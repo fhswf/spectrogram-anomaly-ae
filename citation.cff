@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+title: "autoencoder-anomaly-detection"
+references:
+  - type: dataset
+    title: "Turning Dataset for Chatter Diagnosis Using Machine Learning"
+    authors:
+      - family-names: Khasawneh
+        given-names: Firas
+      - family-names: Otto
+        given-names: Andreas
+      - family-names: Yesilli
+        given-names: Melih
+    year: 2019
+    version: "1"
+    doi: "10.17632/hvm4wh3jzx.1"
+    url: "https://data.mendeley.com/datasets/hvm4wh3jzx/1"
