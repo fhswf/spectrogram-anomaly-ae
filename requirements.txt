@@ -1,0 +1,8 @@
+numpy==2.4.6
+pandas==3.0.3
+scipy==1.17.1
+tensorflow==2.21.0
+Pillow==12.2.0
+matplotlib==3.10.9
+tqdm==4.67.3
+plotly==6.8.0
