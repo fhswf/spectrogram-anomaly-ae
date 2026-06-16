@@ -24,3 +24,5 @@ X, Y, Z → accelerometer signals (3-axis vibration)
 label → binary class (chatter / no_chatter)
 A_time → RMS vibration amplitude
 is_chatter → boolean decision from spectral analysis
+
+
