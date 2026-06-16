@@ -8,3 +8,4 @@ matplotlib==3.10.9
 tqdm==4.67.3
 plotly==6.8.0
 nbformat==5.10.4
+npTDMS==1.10.0
