@@ -1,0 +1,13 @@
+window,label,is_chatter,A_time,segment_path
+0,no_chatter,False,0.004481450498507315,"..\data\01_windowed_labeled_2,5s\4p5inchStickout\F_12-Jun-2017_rpm570_doc0p010\F_12-Jun-2017_rpm570_doc0p010_window_0000.npz"
+1,no_chatter,False,0.004488781902292331,"..\data\01_windowed_labeled_2,5s\4p5inchStickout\F_12-Jun-2017_rpm570_doc0p010\F_12-Jun-2017_rpm570_doc0p010_window_0001.npz"
+2,no_chatter,False,0.004425933113614688,"..\data\01_windowed_labeled_2,5s\4p5inchStickout\F_12-Jun-2017_rpm570_doc0p010\F_12-Jun-2017_rpm570_doc0p010_window_0002.npz"
+3,no_chatter,False,0.004385234132341347,"..\data\01_windowed_labeled_2,5s\4p5inchStickout\F_12-Jun-2017_rpm570_doc0p010\F_12-Jun-2017_rpm570_doc0p010_window_0003.npz"
+4,no_chatter,False,0.005886591754791726,"..\data\01_windowed_labeled_2,5s\4p5inchStickout\F_12-Jun-2017_rpm570_doc0p010\F_12-Jun-2017_rpm570_doc0p010_window_0004.npz"
+5,no_chatter,False,0.036164658518488206,"..\data\01_windowed_labeled_2,5s\4p5inchStickout\F_12-Jun-2017_rpm570_doc0p010\F_12-Jun-2017_rpm570_doc0p010_window_0005.npz"
+6,no_chatter,False,0.04084467412996091,"..\data\01_windowed_labeled_2,5s\4p5inchStickout\F_12-Jun-2017_rpm570_doc0p010\F_12-Jun-2017_rpm570_doc0p010_window_0006.npz"
+7,no_chatter,False,0.0434929347866384,"..\data\01_windowed_labeled_2,5s\4p5inchStickout\F_12-Jun-2017_rpm570_doc0p010\F_12-Jun-2017_rpm570_doc0p010_window_0007.npz"
+8,no_chatter,False,0.04245787950329773,"..\data\01_windowed_labeled_2,5s\4p5inchStickout\F_12-Jun-2017_rpm570_doc0p010\F_12-Jun-2017_rpm570_doc0p010_window_0008.npz"
+9,no_chatter,False,0.04458294186185566,"..\data\01_windowed_labeled_2,5s\4p5inchStickout\F_12-Jun-2017_rpm570_doc0p010\F_12-Jun-2017_rpm570_doc0p010_window_0009.npz"
+10,no_chatter,False,0.04606084013537916,"..\data\01_windowed_labeled_2,5s\4p5inchStickout\F_12-Jun-2017_rpm570_doc0p010\F_12-Jun-2017_rpm570_doc0p010_window_0010.npz"
+11,no_chatter,False,0.04677977227602749,"..\data\01_windowed_labeled_2,5s\4p5inchStickout\F_12-Jun-2017_rpm570_doc0p010\F_12-Jun-2017_rpm570_doc0p010_window_0011.npz"

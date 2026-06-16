@@ -1,0 +1,11 @@
+window,label,is_chatter,A_time,segment_path
+0,no_chatter,False,0.004762458071968077,"..\data\01_windowed_labeled_2,5s\3p5inchStickout\F_12-Jun-2017_rpm570_doc0p030\F_12-Jun-2017_rpm570_doc0p030_window_0000.npz"
+1,no_chatter,False,0.004702189675629683,"..\data\01_windowed_labeled_2,5s\3p5inchStickout\F_12-Jun-2017_rpm570_doc0p030\F_12-Jun-2017_rpm570_doc0p030_window_0001.npz"
+2,no_chatter,False,0.03690124761975031,"..\data\01_windowed_labeled_2,5s\3p5inchStickout\F_12-Jun-2017_rpm570_doc0p030\F_12-Jun-2017_rpm570_doc0p030_window_0002.npz"
+3,no_chatter,False,0.053882158444387755,"..\data\01_windowed_labeled_2,5s\3p5inchStickout\F_12-Jun-2017_rpm570_doc0p030\F_12-Jun-2017_rpm570_doc0p030_window_0003.npz"
+4,no_chatter,False,0.06380641085226009,"..\data\01_windowed_labeled_2,5s\3p5inchStickout\F_12-Jun-2017_rpm570_doc0p030\F_12-Jun-2017_rpm570_doc0p030_window_0004.npz"
+5,no_chatter,False,0.07263102104035565,"..\data\01_windowed_labeled_2,5s\3p5inchStickout\F_12-Jun-2017_rpm570_doc0p030\F_12-Jun-2017_rpm570_doc0p030_window_0005.npz"
+6,no_chatter,False,0.05978713181073891,"..\data\01_windowed_labeled_2,5s\3p5inchStickout\F_12-Jun-2017_rpm570_doc0p030\F_12-Jun-2017_rpm570_doc0p030_window_0006.npz"
+7,no_chatter,False,0.1064315909323566,"..\data\01_windowed_labeled_2,5s\3p5inchStickout\F_12-Jun-2017_rpm570_doc0p030\F_12-Jun-2017_rpm570_doc0p030_window_0007.npz"
+8,no_chatter,False,0.1902551248353253,"..\data\01_windowed_labeled_2,5s\3p5inchStickout\F_12-Jun-2017_rpm570_doc0p030\F_12-Jun-2017_rpm570_doc0p030_window_0008.npz"
+9,no_chatter,False,0.1123537575247876,"..\data\01_windowed_labeled_2,5s\3p5inchStickout\F_12-Jun-2017_rpm570_doc0p030\F_12-Jun-2017_rpm570_doc0p030_window_0009.npz"

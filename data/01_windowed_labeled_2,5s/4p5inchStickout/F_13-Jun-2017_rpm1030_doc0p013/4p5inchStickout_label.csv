@@ -1,0 +1,5 @@
+window,label,is_chatter,A_time,segment_path
+0,no_chatter,False,0.004589583874520753,"..\data\01_windowed_labeled_2,5s\4p5inchStickout\F_13-Jun-2017_rpm1030_doc0p013\F_13-Jun-2017_rpm1030_doc0p013_window_0000.npz"
+1,no_chatter,False,0.06347267160815243,"..\data\01_windowed_labeled_2,5s\4p5inchStickout\F_13-Jun-2017_rpm1030_doc0p013\F_13-Jun-2017_rpm1030_doc0p013_window_0001.npz"
+2,no_chatter,False,0.07024116498728596,"..\data\01_windowed_labeled_2,5s\4p5inchStickout\F_13-Jun-2017_rpm1030_doc0p013\F_13-Jun-2017_rpm1030_doc0p013_window_0002.npz"
+3,no_chatter,False,0.0683840516340484,"..\data\01_windowed_labeled_2,5s\4p5inchStickout\F_13-Jun-2017_rpm1030_doc0p013\F_13-Jun-2017_rpm1030_doc0p013_window_0003.npz"

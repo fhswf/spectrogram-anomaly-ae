@@ -1,0 +1,13 @@
+window,label,is_chatter,A_time,segment_path
+0,no_chatter,False,0.014934274627536763,"..\data\01_windowed_labeled_2,5s\2inchStickout\F_08-Jun-2017_smoothingCut2_noChatter\F_08-Jun-2017_smoothingCut2_noChatter_window_0000.npz"
+1,no_chatter,False,0.025911659607257474,"..\data\01_windowed_labeled_2,5s\2inchStickout\F_08-Jun-2017_smoothingCut2_noChatter\F_08-Jun-2017_smoothingCut2_noChatter_window_0001.npz"
+2,no_chatter,False,0.08770085884067494,"..\data\01_windowed_labeled_2,5s\2inchStickout\F_08-Jun-2017_smoothingCut2_noChatter\F_08-Jun-2017_smoothingCut2_noChatter_window_0002.npz"
+3,no_chatter,False,0.059491220796006127,"..\data\01_windowed_labeled_2,5s\2inchStickout\F_08-Jun-2017_smoothingCut2_noChatter\F_08-Jun-2017_smoothingCut2_noChatter_window_0003.npz"
+4,no_chatter,False,0.04932140486529438,"..\data\01_windowed_labeled_2,5s\2inchStickout\F_08-Jun-2017_smoothingCut2_noChatter\F_08-Jun-2017_smoothingCut2_noChatter_window_0004.npz"
+5,no_chatter,False,0.04516756106373039,"..\data\01_windowed_labeled_2,5s\2inchStickout\F_08-Jun-2017_smoothingCut2_noChatter\F_08-Jun-2017_smoothingCut2_noChatter_window_0005.npz"
+6,no_chatter,False,0.04409988345080089,"..\data\01_windowed_labeled_2,5s\2inchStickout\F_08-Jun-2017_smoothingCut2_noChatter\F_08-Jun-2017_smoothingCut2_noChatter_window_0006.npz"
+7,no_chatter,False,0.04548490062442475,"..\data\01_windowed_labeled_2,5s\2inchStickout\F_08-Jun-2017_smoothingCut2_noChatter\F_08-Jun-2017_smoothingCut2_noChatter_window_0007.npz"
+8,no_chatter,False,0.0449794844769801,"..\data\01_windowed_labeled_2,5s\2inchStickout\F_08-Jun-2017_smoothingCut2_noChatter\F_08-Jun-2017_smoothingCut2_noChatter_window_0008.npz"
+9,no_chatter,False,0.04551839535042333,"..\data\01_windowed_labeled_2,5s\2inchStickout\F_08-Jun-2017_smoothingCut2_noChatter\F_08-Jun-2017_smoothingCut2_noChatter_window_0009.npz"
+10,no_chatter,False,0.04755035989302184,"..\data\01_windowed_labeled_2,5s\2inchStickout\F_08-Jun-2017_smoothingCut2_noChatter\F_08-Jun-2017_smoothingCut2_noChatter_window_0010.npz"
+11,no_chatter,False,0.04865104672535966,"..\data\01_windowed_labeled_2,5s\2inchStickout\F_08-Jun-2017_smoothingCut2_noChatter\F_08-Jun-2017_smoothingCut2_noChatter_window_0011.npz"
