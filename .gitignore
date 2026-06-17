@@ -1,2 +1,10 @@
 .spectro-ae-venv/
 notebooks/experimental/
+
+.venv/
+.uv/
+.vscode/
+.ipynb_checkpoints/
+
+data/raw/
+data/raw_mat/
