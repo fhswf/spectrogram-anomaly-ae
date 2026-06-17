@@ -11,9 +11,18 @@ dependencies = [
     "ipykernel>=7.3.0",
     "jupyter>=1.1.1",
     "jupyterlab>=4.5.8",
+    "keras>=3.14.1",
+    "matplotlib>=3.10.9",
+    "nbformat>=5.10.4",
+    "nptdms>=1.10.0",
     "numpy>=2.4.6",
     "pandas>=3.0.3",
+    "pillow>=12.2.0",
+    "plotly>=6.8.0",
+    "scikit-learn>=1.9.0",
     "scipy>=1.17.1",
+    "tensorflow>=2.21.0",
+    "tqdm>=4.67.3",
 ]
 
 [build-system]
