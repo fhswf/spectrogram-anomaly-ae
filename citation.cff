@@ -1,5 +1,12 @@
 cff-version: 1.2.0
 title: "autoencoder-anomaly-detection"
+authors:
+  - family-names: Zeleny
+    given-names: Sebastian
+  - family-names: Gawron
+    given-names: Christian
+    affiliation: "FH Südwestfalen"
+    orcid: https://orcid.org/0000-0001-7139-7920
 references:
   - type: dataset
     title: "Turning Dataset for Chatter Diagnosis Using Machine Learning"
