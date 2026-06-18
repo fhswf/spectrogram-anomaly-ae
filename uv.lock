@@ -2166,6 +2166,7 @@ name = "spectrogram-anomaly-ae"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "h5py" },
     { name = "ipykernel" },
     { name = "jupyter" },
     { name = "jupyterlab" },
@@ -2185,6 +2186,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "h5py", specifier = ">=3.14.0" },
     { name = "ipykernel", specifier = ">=7.3.0" },
     { name = "jupyter", specifier = ">=1.1.1" },
     { name = "jupyterlab", specifier = ">=4.5.8" },

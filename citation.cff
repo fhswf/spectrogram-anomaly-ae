@@ -21,3 +21,19 @@ references:
     version: "1"
     doi: "10.17632/hvm4wh3jzx.1"
     url: "https://data.mendeley.com/datasets/hvm4wh3jzx/1"
+  - type: article
+    title: "Smart Data Collection System for Brownfield CNC Milling Machines: A New Benchmark Dataset for Data-Driven Machine Monitoring"
+    authors:
+      - family-names: Tnani
+        given-names: Mohamed-Ali
+      - family-names: Feil
+        given-names: Michael
+      - family-names: Diepold
+        given-names: Klaus
+    year: 2022
+    journal: "Procedia CIRP"
+    volume: "107"
+    start: 131
+    end: 136
+    doi: "10.1016/j.procir.2022.04.022"
+    url: "https://github.com/boschresearch/CNC_Machining"

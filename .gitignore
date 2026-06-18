@@ -6,5 +6,8 @@ notebooks/experimental/
 .vscode/
 .ipynb_checkpoints/
 
+data/
 data/raw/
 data/raw_mat/
+data/02_spectrograms_150x100px_dataset
+**/__pycache__/
