@@ -46,6 +46,35 @@ class CNCMachiningTests(unittest.TestCase):
             self.assertEqual(npz["X"].shape, (5_000,))
             self.assertEqual(float(npz["fs"]), 2_000.0)
             self.assertEqual(str(npz["source_dataset"]), "cnc_machining")
+            self.assertEqual(int(npz["target_window_samples"]), 5_000)
+            self.assertEqual(int(npz["window_samples"]), 5_000)
+
+    def test_short_records_are_exported_as_one_full_file_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            h5_path = root / "data" / "M01" / "OP00" / "good" / "M01_Aug_2019_OP00_000.h5"
+            h5_path.parent.mkdir(parents=True)
+            values = np.arange(18_000, dtype=np.float32).reshape(6_000, 3)
+            with h5py.File(h5_path, "w") as handle:
+                handle.create_dataset("vibration_data", data=values)
+
+            record = next(iter_cnc_records(root))
+            rows = export_cnc_record_windows(
+                record,
+                root / "npz",
+                split="train",
+                window_samples=400_000,
+                label_scheme="anomaly",
+            )
+
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["target_window_samples"], 400_000)
+            self.assertEqual(rows[0]["window_samples"], 6_000)
+
+            npz = np.load(rows[0]["npz_path"])
+            self.assertEqual(npz["X"].shape, (6_000,))
+            self.assertEqual(int(npz["target_window_samples"]), 400_000)
+            self.assertEqual(int(npz["window_samples"]), 6_000)
 
     def test_bad_records_are_not_assigned_to_train_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

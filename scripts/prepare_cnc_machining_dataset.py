@@ -9,6 +9,7 @@ from pathlib import Path
 import pandas as pd
 
 from spectrogram_anomaly_ae.cnc_machining import (
+    CNC_MACHINING_REFERENCE_WINDOW_SAMPLES,
     CNC_MACHINING_SAMPLE_RATE_HZ,
     assign_cnc_record_splits,
     export_cnc_record_windows,
@@ -48,7 +49,18 @@ def parse_args() -> argparse.Namespace:
         help="CSV path for split/label counts.",
     )
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--window-seconds", type=float, default=2.5)
+    parser.add_argument(
+        "--window-samples",
+        type=int,
+        default=CNC_MACHINING_REFERENCE_WINDOW_SAMPLES,
+        help="Number of samples per window. Defaults to the turning dataset window size.",
+    )
+    parser.add_argument(
+        "--window-seconds",
+        type=float,
+        default=None,
+        help="Optional duration-based window size. If provided, overrides --window-samples.",
+    )
     parser.add_argument("--overlap", type=float, default=0.0)
     parser.add_argument(
         "--label-scheme",
@@ -81,6 +93,7 @@ def main() -> None:
                 args.output_root,
                 split=split_by_path[record.path],
                 sample_rate_hz=CNC_MACHINING_SAMPLE_RATE_HZ,
+                window_samples=args.window_samples,
                 window_seconds=args.window_seconds,
                 overlap=args.overlap,
                 label_scheme=args.label_scheme,
@@ -89,12 +102,18 @@ def main() -> None:
         )
 
     manifest = pd.DataFrame(rows)
-    manifest["npz_path"] = manifest["npz_path"].map(
-        lambda path: str(Path(path).resolve().relative_to(Path.cwd().resolve()))
-        if Path(path).resolve().is_relative_to(Path.cwd().resolve())
-        else path
-    )
-    manifest["source_file"] = manifest["source_file"].astype(str)
+    if not manifest.empty:
+        manifest["npz_path"] = manifest["npz_path"].map(
+            lambda path: str(Path(path).resolve().relative_to(Path.cwd().resolve()))
+            if Path(path).resolve().is_relative_to(Path.cwd().resolve())
+            else path
+        )
+        manifest["source_file"] = manifest["source_file"].astype(str)
+    else:
+        print(
+            "No CNC windows were generated. "
+            f"Try a smaller --window-samples value if the source files are shorter than {args.window_samples} samples."
+        )
 
     args.manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest.to_csv(args.manifest_path, index=False)
@@ -105,6 +124,8 @@ def main() -> None:
         .rename("n")
         .reset_index()
         .sort_values(["source_dataset", "split", "label"])
+        if not manifest.empty
+        else pd.DataFrame(columns=["source_dataset", "split", "label", "n"])
     )
     args.summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary.to_csv(args.summary_path, index=False)

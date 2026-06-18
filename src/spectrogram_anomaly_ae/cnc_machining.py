@@ -12,6 +12,7 @@ import numpy as np
 
 CNC_MACHINING_SAMPLE_RATE_HZ = 2_000
 CNC_MACHINING_DATASET_KEY = "vibration_data"
+CNC_MACHINING_REFERENCE_WINDOW_SAMPLES = 400_000
 
 _FILENAME_RE = re.compile(
     r"^(?P<machine>M\d{2})_(?P<month>[A-Za-z]{3})_(?P<year>\d{4})_"
@@ -196,7 +197,8 @@ def export_cnc_record_windows(
     *,
     split: str,
     sample_rate_hz: int = CNC_MACHINING_SAMPLE_RATE_HZ,
-    window_seconds: float = 2.5,
+    window_samples: int = CNC_MACHINING_REFERENCE_WINDOW_SAMPLES,
+    window_seconds: float | None = None,
     overlap: float = 0.0,
     label_scheme: str = "anomaly",
     overwrite: bool = False,
@@ -206,31 +208,43 @@ def export_cnc_record_windows(
     Returns manifest rows matching the generated files.
     """
 
-    if window_seconds <= 0:
+    if window_seconds is not None and window_seconds <= 0:
         raise ValueError("window_seconds must be positive")
+    if window_samples <= 0:
+        raise ValueError("window_samples must be positive")
     if not 0 <= overlap < 1:
         raise ValueError("overlap must be in the interval [0, 1)")
 
     data = load_cnc_vibration(record)
-    window_size = int(round(window_seconds * sample_rate_hz))
+    window_size = (
+        int(round(window_seconds * sample_rate_hz))
+        if window_seconds is not None
+        else int(window_samples)
+    )
     step_size = int(round(window_size * (1 - overlap)))
     if window_size <= 0 or step_size <= 0:
-        raise ValueError("window_seconds and overlap produced an invalid window step")
+        raise ValueError("window size and overlap produced an invalid window step")
 
     output_root = Path(output_root)
     output_dir = output_root / record.machine / record.operation / record.health_label
     output_dir.mkdir(parents=True, exist_ok=True)
 
     label = map_cnc_label(record.health_label, label_scheme=label_scheme)
+    window_starts = list(range(0, len(data) - window_size + 1, step_size))
+    if not window_starts and len(data) > 0:
+        window_starts = [0]
+
     rows: list[dict[str, object]] = []
-    for window, start in enumerate(range(0, len(data) - window_size + 1, step_size)):
-        stop = start + window_size
+    for window, start in enumerate(window_starts):
+        stop = min(start + window_size, len(data))
         segment = data[start:stop]
+        actual_window_size = len(segment)
         out_path = output_dir / f"{record.sample_id}_window_{window:04d}.npz"
         if out_path.exists() and not overwrite:
             raise FileExistsError(f"Refusing to overwrite existing file: {out_path}")
 
-        time_vector = np.arange(window_size, dtype=np.float64) / sample_rate_hz
+        time_vector = np.arange(actual_window_size, dtype=np.float64) / sample_rate_hz
+        actual_window_duration_seconds = actual_window_size / sample_rate_hz
         np.savez_compressed(
             out_path,
             t=time_vector,
@@ -242,6 +256,9 @@ def export_cnc_record_windows(
             is_anomaly=record.is_anomaly,
             A_time=float(np.sqrt(np.mean(segment**2))),
             fs=float(sample_rate_hz),
+            target_window_samples=window_size,
+            window_samples=actual_window_size,
+            window_seconds=actual_window_duration_seconds,
             source_dataset="cnc_machining",
             machine=record.machine,
             operation=record.operation,
@@ -266,7 +283,9 @@ def export_cnc_record_windows(
                 "is_anomaly": record.is_anomaly,
                 "split": split,
                 "sample_rate_hz": sample_rate_hz,
-                "window_seconds": window_seconds,
+                "target_window_samples": window_size,
+                "window_samples": actual_window_size,
+                "window_seconds": actual_window_duration_seconds,
                 "npz_path": str(out_path),
                 "source_file": str(record.path),
             }
