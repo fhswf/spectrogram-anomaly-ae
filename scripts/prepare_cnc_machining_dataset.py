@@ -53,7 +53,10 @@ def parse_args() -> argparse.Namespace:
         "--window-samples",
         type=int,
         default=CNC_MACHINING_REFERENCE_WINDOW_SAMPLES,
-        help="Number of samples per window. Defaults to the turning dataset window size.",
+        help=(
+            "Target samples per window. Defaults to the turning dataset window size; "
+            "shorter source files are exported as one full-file window."
+        ),
     )
     parser.add_argument(
         "--window-seconds",
@@ -112,7 +115,7 @@ def main() -> None:
     else:
         print(
             "No CNC windows were generated. "
-            f"Try a smaller --window-samples value if the source files are shorter than {args.window_samples} samples."
+            "Check that the source root contains non-empty CNC vibration files."
         )
 
     args.manifest_path.parent.mkdir(parents=True, exist_ok=True)
