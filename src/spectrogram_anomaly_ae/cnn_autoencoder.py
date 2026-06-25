@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import random
 from pathlib import Path
 from typing import Any
@@ -120,8 +121,17 @@ def train_autoencoder(
     device: str | torch.device | None = None,
     seed: int | None = None,
     progress: bool = True,
+    early_stopping: bool = False,
+    patience: int = 100,
+    min_delta: float = 0.0,
+    restore_best_weights: bool = True,
 ) -> dict[str, list[float]]:
     """Train an autoencoder on NHWC NumPy image arrays."""
+    if patience <= 0:
+        raise ValueError("patience must be positive")
+    if min_delta < 0:
+        raise ValueError("min_delta must be non-negative")
+
     device = get_device(device)
     if seed is not None:
         set_seed(seed)
@@ -143,11 +153,16 @@ def train_autoencoder(
     validation_tensor = images_to_tensor(validation_images, device)
 
     history = {"loss": [], "val_loss": []}
+    best_val_loss = float("inf")
+    best_state_dict: dict[str, torch.Tensor] | None = None
+    epochs_without_improvement = 0
+    progress_bar = None
     epoch_iterable = range(epochs)
     if progress:
         from tqdm.auto import tqdm
 
-        epoch_iterable = tqdm(epoch_iterable, desc="Training CNN-AE")
+        progress_bar = tqdm(epoch_iterable, desc="Training CNN-AE")
+        epoch_iterable = progress_bar
 
     for _ in epoch_iterable:
         model.train()
@@ -165,8 +180,43 @@ def train_autoencoder(
         with torch.inference_mode():
             validation_loss = criterion(model(validation_tensor), validation_tensor).item()
 
-        history["loss"].append(float(np.mean(batch_losses)))
+        train_loss = float(np.mean(batch_losses))
+        history["loss"].append(train_loss)
         history["val_loss"].append(float(validation_loss))
+
+        if early_stopping:
+            improved = validation_loss < best_val_loss - min_delta
+            if improved:
+                best_val_loss = validation_loss
+                epochs_without_improvement = 0
+                if restore_best_weights:
+                    best_state_dict = deepcopy(model.state_dict())
+            else:
+                epochs_without_improvement += 1
+                if epochs_without_improvement >= patience:
+                    if progress_bar is not None:
+                        progress_bar.set_postfix(
+                            loss=f"{train_loss:.6f}",
+                            val_loss=f"{validation_loss:.6f}",
+                            best_val_loss=f"{best_val_loss:.6f}",
+                            patience=f"{epochs_without_improvement}/{patience}",
+                        )
+                    break
+
+        if progress_bar is not None:
+            progress_bar.set_postfix(
+                loss=f"{train_loss:.6f}",
+                val_loss=f"{validation_loss:.6f}",
+                best_val_loss=f"{best_val_loss:.6f}",
+                patience=(
+                    f"{epochs_without_improvement}/{patience}"
+                    if early_stopping
+                    else "off"
+                ),
+            )
+
+    if early_stopping and restore_best_weights and best_state_dict is not None:
+        model.load_state_dict(best_state_dict)
 
     return history
 

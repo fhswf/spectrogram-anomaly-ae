@@ -12,6 +12,7 @@ from spectrogram_anomaly_ae.cnc_machining import (
     CNC_MACHINING_REFERENCE_WINDOW_SAMPLES,
     CNC_MACHINING_SAMPLE_RATE_HZ,
     assign_cnc_record_splits,
+    estimate_cnc_channel_normalization,
     export_cnc_record_windows,
     iter_cnc_records,
 )
@@ -80,6 +81,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Overwrite existing NPZ files.",
     )
+    parser.add_argument(
+        "--normalize-channels",
+        action="store_true",
+        help=(
+            "Z-score each CNC vibration channel using statistics estimated from "
+            "nominal training records only."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -87,6 +96,18 @@ def main() -> None:
     args = parse_args()
     records = list(iter_cnc_records(args.source_root))
     split_by_path = assign_cnc_record_splits(records, seed=args.seed)
+    channel_normalization = (
+        estimate_cnc_channel_normalization(records, split_by_path)
+        if args.normalize_channels
+        else None
+    )
+    if channel_normalization is not None:
+        print(
+            "CNC channel normalization "
+            f"mean={channel_normalization.mean.tolist()} "
+            f"std={channel_normalization.std.tolist()} "
+            f"samples={channel_normalization.sample_count}"
+        )
 
     rows: list[dict[str, object]] = []
     for record in records:
@@ -100,6 +121,7 @@ def main() -> None:
                 window_seconds=args.window_seconds,
                 overlap=args.overlap,
                 label_scheme=args.label_scheme,
+                channel_normalization=channel_normalization,
                 overwrite=args.overwrite,
             )
         )

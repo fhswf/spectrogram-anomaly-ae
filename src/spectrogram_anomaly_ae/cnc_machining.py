@@ -46,6 +46,45 @@ class CNCMachiningRecord:
         return f"{self.machine}_{self.timeframe}_{self.operation}_{self.example_id}"
 
 
+@dataclass(frozen=True)
+class CNCChannelNormalization:
+    """Per-channel z-score parameters for CNC vibration windows."""
+
+    mean: np.ndarray
+    std: np.ndarray
+    sample_count: int
+    method: str = "zscore_train_nominal"
+
+    def __post_init__(self) -> None:
+        mean = np.asarray(self.mean, dtype=np.float64)
+        std = np.asarray(self.std, dtype=np.float64)
+        if mean.shape != (3,) or std.shape != (3,):
+            raise ValueError(
+                "CNC channel normalization mean and std must have shape (3,), "
+                f"got {mean.shape} and {std.shape}"
+            )
+        if not np.all(np.isfinite(mean)) or not np.all(np.isfinite(std)):
+            raise ValueError("CNC channel normalization values must be finite")
+        if np.any(std <= 0):
+            raise ValueError("CNC channel normalization std values must be positive")
+        if self.sample_count <= 0:
+            raise ValueError("CNC channel normalization sample_count must be positive")
+
+        object.__setattr__(self, "mean", mean)
+        object.__setattr__(self, "std", std)
+
+    def apply(self, data: np.ndarray) -> np.ndarray:
+        """Return data normalized channel-wise with these training statistics."""
+
+        data = np.asarray(data, dtype=np.float32)
+        if data.ndim != 2 or data.shape[1] != 3:
+            raise ValueError(
+                "Expected CNC vibration data with shape (n_samples, 3), got "
+                f"{data.shape}"
+            )
+        return ((data - self.mean) / self.std).astype(np.float32)
+
+
 def resolve_cnc_data_root(path: str | Path) -> Path:
     """Return the dataset's ``data`` directory from a repo root or data root."""
 
@@ -191,6 +230,50 @@ def assign_cnc_record_splits(
     return splits
 
 
+def estimate_cnc_channel_normalization(
+    records: Iterable[CNCMachiningRecord],
+    split_by_path: dict[Path, str],
+    *,
+    train_split: str = "train",
+    nominal_health_label: str = "good",
+) -> CNCChannelNormalization:
+    """Estimate per-channel z-score stats from nominal training records only."""
+
+    count = 0
+    mean = np.zeros(3, dtype=np.float64)
+    m2 = np.zeros(3, dtype=np.float64)
+
+    for record in records:
+        if record.health_label != nominal_health_label:
+            continue
+        if split_by_path.get(record.path) != train_split:
+            continue
+
+        data = load_cnc_vibration(record).astype(np.float64, copy=False)
+        if len(data) == 0:
+            continue
+
+        batch_count = len(data)
+        batch_mean = np.mean(data, axis=0)
+        centered = data - batch_mean
+        batch_m2 = np.sum(centered * centered, axis=0)
+
+        total_count = count + batch_count
+        delta = batch_mean - mean
+        mean = mean + delta * (batch_count / total_count)
+        m2 = m2 + batch_m2 + delta * delta * count * batch_count / total_count
+        count = total_count
+
+    if count == 0:
+        raise ValueError(
+            "No nominal training CNC samples were available for channel normalization"
+        )
+
+    std = np.sqrt(m2 / count)
+    std = np.where(std > 0, std, 1.0)
+    return CNCChannelNormalization(mean=mean, std=std, sample_count=count)
+
+
 def export_cnc_record_windows(
     record: CNCMachiningRecord,
     output_root: str | Path,
@@ -201,6 +284,7 @@ def export_cnc_record_windows(
     window_seconds: float | None = None,
     overlap: float = 0.0,
     label_scheme: str = "anomaly",
+    channel_normalization: CNCChannelNormalization | None = None,
     overwrite: bool = False,
 ) -> list[dict[str, object]]:
     """Export one HDF5 record into windowed ``.npz`` files.
@@ -216,6 +300,11 @@ def export_cnc_record_windows(
         raise ValueError("overlap must be in the interval [0, 1)")
 
     data = load_cnc_vibration(record)
+    export_data = (
+        channel_normalization.apply(data)
+        if channel_normalization is not None
+        else data
+    )
     window_size = (
         int(round(window_seconds * sample_rate_hz))
         if window_seconds is not None
@@ -237,7 +326,8 @@ def export_cnc_record_windows(
     rows: list[dict[str, object]] = []
     for window, start in enumerate(window_starts):
         stop = min(start + window_size, len(data))
-        segment = data[start:stop]
+        raw_segment = data[start:stop]
+        segment = export_data[start:stop]
         actual_window_size = len(segment)
         out_path = output_dir / f"{record.sample_id}_window_{window:04d}.npz"
         if out_path.exists() and not overwrite:
@@ -255,6 +345,7 @@ def export_cnc_record_windows(
             source_label=record.health_label,
             is_anomaly=record.is_anomaly,
             A_time=float(np.sqrt(np.mean(segment**2))),
+            A_time_raw=float(np.sqrt(np.mean(raw_segment**2))),
             fs=float(sample_rate_hz),
             target_window_samples=window_size,
             window_samples=actual_window_size,
@@ -267,6 +358,26 @@ def export_cnc_record_windows(
             window=window,
             start_sample=start,
             stop_sample=stop,
+            channel_normalization_method=(
+                channel_normalization.method
+                if channel_normalization is not None
+                else "none"
+            ),
+            channel_normalization_mean=(
+                channel_normalization.mean
+                if channel_normalization is not None
+                else np.full(3, np.nan)
+            ),
+            channel_normalization_std=(
+                channel_normalization.std
+                if channel_normalization is not None
+                else np.full(3, np.nan)
+            ),
+            channel_normalization_sample_count=(
+                channel_normalization.sample_count
+                if channel_normalization is not None
+                else 0
+            ),
         )
 
         rows.append(
@@ -288,6 +399,11 @@ def export_cnc_record_windows(
                 "window_seconds": actual_window_duration_seconds,
                 "npz_path": str(out_path),
                 "source_file": str(record.path),
+                "channel_normalization_method": (
+                    channel_normalization.method
+                    if channel_normalization is not None
+                    else "none"
+                ),
             }
         )
 
