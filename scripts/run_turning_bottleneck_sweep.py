@@ -35,7 +35,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=4000)
     parser.add_argument("--patience", type=int, default=250)
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=42, help="Legacy single-seed option.")
+    parser.add_argument(
+        "--seeds",
+        nargs="+",
+        type=int,
+        default=None,
+        help="Train each bottleneck dimension once per seed. Defaults to --seed.",
+    )
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--n-ver-segments", type=int, default=10)
     parser.add_argument("--ver-top-k", type=int, default=3)
@@ -43,6 +50,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-dir", type=Path, default=Path("models/bottleneck_sweep"))
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--progress", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--reference-dim", type=int, default=16)
     return parser.parse_args()
 
 
@@ -238,8 +246,68 @@ def write_json(path: Path, payload: object) -> None:
         json.dump(payload, file, indent=2)
 
 
+def summarize_numeric(
+    frame: pd.DataFrame,
+    group_columns: list[str],
+    numeric_columns: list[str],
+) -> pd.DataFrame:
+    available_numeric_columns = [column for column in numeric_columns if column in frame.columns]
+    if frame.empty or not available_numeric_columns:
+        return pd.DataFrame()
+
+    summary = (
+        frame.groupby(group_columns, dropna=False)[available_numeric_columns]
+        .agg(["count", "mean", "std", "min", "max"])
+        .reset_index()
+    )
+    summary.columns = [
+        "_".join(str(part) for part in column if part)
+        if isinstance(column, tuple)
+        else str(column)
+        for column in summary.columns
+    ]
+
+    for column in available_numeric_columns:
+        count_column = f"{column}_count"
+        std_column = f"{column}_std"
+        if count_column in summary.columns and std_column in summary.columns:
+            sem = summary[std_column] / np.sqrt(summary[count_column].clip(lower=1))
+            summary[f"{column}_ci95"] = 1.96 * sem.fillna(0.0)
+    return summary
+
+
+def metric_deltas_vs_reference(metrics: pd.DataFrame, reference_dim: int) -> pd.DataFrame:
+    if "seed" not in metrics.columns or reference_dim not in set(metrics["bottleneck_dim"]):
+        return pd.DataFrame()
+
+    merge_columns = ["seed", "dataset", "method", "score"]
+    numeric_columns = [
+        "validation_f1",
+        "validation_precision",
+        "validation_recall",
+        "pr_auc",
+        "f1",
+        "precision",
+        "recall",
+        "tn",
+        "fp",
+        "fn",
+        "tp",
+    ]
+    reference = metrics[metrics["bottleneck_dim"] == reference_dim][
+        merge_columns + numeric_columns
+    ].copy()
+    reference = reference.rename(columns={column: f"{column}_reference" for column in numeric_columns})
+    deltas = metrics.merge(reference, on=merge_columns, how="inner")
+    deltas["reference_dim"] = reference_dim
+    for column in numeric_columns:
+        deltas[f"{column}_delta"] = deltas[column] - deltas[f"{column}_reference"]
+    return deltas
+
+
 def main() -> None:
     args = parse_args()
+    seeds = args.seeds if args.seeds is not None else [args.seed]
     repo_root = Path.cwd()
     dataset_root = repo_root / "data" / "02_spectrograms_150x100px_dataset"
     manifest_path = repo_root / "reports" / "manifests" / "turning_split_seed42.csv"
@@ -264,33 +332,35 @@ def main() -> None:
     )
 
     training_images = load_training_images(dataset_root, image_size)
-    x_train, x_val = train_test_split(
-        training_images, test_size=0.2, random_state=args.seed, shuffle=True
-    )
 
     all_metric_rows: list[dict[str, object]] = []
     all_fit_rows: list[dict[str, object]] = []
     all_score_stat_rows: list[pd.DataFrame] = []
+    run_grid = [(bottleneck_dim, seed) for bottleneck_dim in args.dims for seed in seeds]
 
-    for bottleneck_dim in tqdm(
-        args.dims, desc="Bottleneck sweep", unit="model", disable=not args.progress
+    for bottleneck_dim, seed in tqdm(
+        run_grid, desc="Bottleneck/seed sweep", unit="run", disable=not args.progress
     ):
-        metrics_path = args.output_dir / f"metrics_bn{bottleneck_dim}.csv"
-        history_path = args.output_dir / f"history_bn{bottleneck_dim}.csv"
-        scores_path = args.output_dir / f"scores_bn{bottleneck_dim}.csv"
-        stats_path = args.output_dir / f"score_stats_bn{bottleneck_dim}.csv"
-        thresholds_path = args.output_dir / f"thresholds_bn{bottleneck_dim}.json"
-        model_path = args.model_dir / f"ae_bn{bottleneck_dim}_turning_seed{args.seed}.keras"
+        run_name = f"bn{bottleneck_dim}_seed{seed}"
+        metrics_path = args.output_dir / f"metrics_{run_name}.csv"
+        history_path = args.output_dir / f"history_{run_name}.csv"
+        scores_path = args.output_dir / f"scores_{run_name}.csv"
+        stats_path = args.output_dir / f"score_stats_{run_name}.csv"
+        thresholds_path = args.output_dir / f"thresholds_{run_name}.json"
+        model_path = args.model_dir / f"ae_bn{bottleneck_dim}_turning_seed{seed}.keras"
 
         if metrics_path.exists() and history_path.exists() and scores_path.exists() and not args.overwrite:
-            print(f"Skipping BN{bottleneck_dim}: existing outputs found.", flush=True)
+            print(f"Skipping {run_name}: existing outputs found.", flush=True)
             existing_metrics = pd.read_csv(metrics_path)
             existing_history = pd.read_csv(history_path)
             existing_stats = pd.read_csv(stats_path)
+            if "seed" not in existing_metrics.columns:
+                existing_metrics.insert(1, "seed", seed)
             all_metric_rows.extend(existing_metrics.to_dict("records"))
             all_fit_rows.append(
                 {
                     "bottleneck_dim": bottleneck_dim,
+                    "seed": seed,
                     "epochs_trained": int(existing_history["epoch"].max() + 1),
                     "best_epoch": int(existing_history["val_loss"].idxmin() + 1),
                     "final_loss": float(existing_history["loss"].iloc[-1]),
@@ -300,17 +370,21 @@ def main() -> None:
                 }
             )
             existing_stats.insert(0, "bottleneck_dim", bottleneck_dim)
+            existing_stats.insert(1, "seed", seed)
             all_score_stat_rows.append(existing_stats)
             continue
 
-        print(f"Training BN{bottleneck_dim}...", flush=True)
+        print(f"Training {run_name}...", flush=True)
         tf.keras.backend.clear_session()
-        set_seed(args.seed)
+        set_seed(seed)
+        x_train, x_val = train_test_split(
+            training_images, test_size=0.2, random_state=seed, shuffle=True
+        )
         model = build_autoencoder(bottleneck_dim, args.learning_rate)
         callbacks = [
             TqdmEpochCallback(
                 total_epochs=args.epochs,
-                desc=f"BN{bottleneck_dim}",
+                desc=run_name,
                 disable=not args.progress,
             ),
             tf.keras.callbacks.EarlyStopping(
@@ -373,6 +447,7 @@ def main() -> None:
             metric_rows.append(
                 {
                     "bottleneck_dim": bottleneck_dim,
+                    "seed": seed,
                     "dataset": "turning",
                     "method": "cnn_ae",
                     "score": score_name,
@@ -393,10 +468,12 @@ def main() -> None:
         stats_df.to_csv(stats_path, index=False)
         stats_with_dim = stats_df.copy()
         stats_with_dim.insert(0, "bottleneck_dim", bottleneck_dim)
+        stats_with_dim.insert(1, "seed", seed)
         all_score_stat_rows.append(stats_with_dim)
 
         fit_row = {
             "bottleneck_dim": bottleneck_dim,
+            "seed": seed,
             "epochs_trained": int(len(history_df)),
             "best_epoch": int(history_df["val_loss"].idxmin() + 1),
             "final_loss": float(history_df["loss"].iloc[-1]),
@@ -409,17 +486,75 @@ def main() -> None:
         all_fit_rows.append(fit_row)
 
         print(
-            f"BN{bottleneck_dim}: best val_loss={fit_row['best_val_loss']:.6f}, "
+            f"{run_name}: best val_loss={fit_row['best_val_loss']:.6f}, "
             f"global_mse PR-AUC={metrics_df.loc[metrics_df['score'] == 'global_mse', 'pr_auc'].iloc[0]:.6f}, "
             f"ver_topk PR-AUC={metrics_df.loc[metrics_df['score'] == 'ver_topk', 'pr_auc'].iloc[0]:.6f}",
             flush=True,
         )
 
-    pd.DataFrame(all_metric_rows).to_csv(args.output_dir / "metrics_all.csv", index=False)
-    pd.DataFrame(all_fit_rows).to_csv(args.output_dir / "fit_summary.csv", index=False)
+    all_metrics = pd.DataFrame(all_metric_rows)
+    all_metrics.to_csv(args.output_dir / "metrics_all.csv", index=False)
+    metrics_summary = summarize_numeric(
+        all_metrics,
+        group_columns=["bottleneck_dim", "dataset", "method", "score"],
+        numeric_columns=[
+            "validation_f1",
+            "validation_precision",
+            "validation_recall",
+            "pr_auc",
+            "f1",
+            "precision",
+            "recall",
+            "tn",
+            "fp",
+            "fn",
+            "tp",
+        ],
+    )
+    metrics_summary.to_csv(args.output_dir / "metrics_summary.csv", index=False)
+
+    metric_deltas = metric_deltas_vs_reference(all_metrics, args.reference_dim)
+    if not metric_deltas.empty:
+        metric_deltas.to_csv(
+            args.output_dir / f"metric_deltas_vs_bn{args.reference_dim}.csv", index=False
+        )
+        delta_columns = [column for column in metric_deltas.columns if column.endswith("_delta")]
+        metric_delta_summary = summarize_numeric(
+            metric_deltas,
+            group_columns=["reference_dim", "bottleneck_dim", "dataset", "method", "score"],
+            numeric_columns=delta_columns,
+        )
+        metric_delta_summary.to_csv(
+            args.output_dir / f"metric_delta_summary_vs_bn{args.reference_dim}.csv",
+            index=False,
+        )
+
+    fit_summary = pd.DataFrame(all_fit_rows)
+    fit_summary.to_csv(args.output_dir / "fit_summary.csv", index=False)
+    summarize_numeric(
+        fit_summary,
+        group_columns=["bottleneck_dim"],
+        numeric_columns=[
+            "epochs_trained",
+            "best_epoch",
+            "final_loss",
+            "final_val_loss",
+            "best_val_loss",
+            "internal_train_global_mse_mean",
+            "internal_val_global_mse_mean",
+        ],
+    ).to_csv(args.output_dir / "fit_summary_by_dim.csv", index=False)
+
     if all_score_stat_rows:
-        pd.concat(all_score_stat_rows, ignore_index=True).to_csv(
-            args.output_dir / "score_stats_all.csv", index=False
+        score_stats_all = pd.concat(all_score_stat_rows, ignore_index=True)
+        score_stats_all.to_csv(args.output_dir / "score_stats_all.csv", index=False)
+        summarize_numeric(
+            score_stats_all,
+            group_columns=["bottleneck_dim", "split", "label", "score"],
+            numeric_columns=["mean", "std", "median", "p90"],
+        ).to_csv(
+            args.output_dir / "score_stats_summary.csv",
+            index=False,
         )
     print(f"Wrote sweep outputs to {args.output_dir}", flush=True)
 
