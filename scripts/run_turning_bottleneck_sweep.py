@@ -23,6 +23,12 @@ from tensorflow.keras.layers import Conv2D, Dense, Flatten, Input, MaxPooling2D,
 from tensorflow.keras.models import Sequential
 from tqdm.auto import tqdm
 
+from spectrogram_anomaly_ae.turning_cv import (
+    fold_balance,
+    make_grouped_cv_assignments,
+    run_turning_ae_grouped_cv,
+)
+
 
 SCORE_COLUMNS = ["global_mse", "global_mae", "ver_max", "ver_topk"]
 
@@ -51,6 +57,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--progress", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--reference-dim", type=int, default=16)
+    parser.add_argument(
+        "--grouped-cv",
+        action="store_true",
+        help="Run repeated stratified grouped k-fold CV by source_run instead of the fixed validation/test sweep.",
+    )
+    parser.add_argument("--cv-folds", type=int, default=5)
+    parser.add_argument(
+        "--save-cv-models",
+        action="store_true",
+        help="Persist every grouped-CV fold model. Disabled by default to avoid large sweep output.",
+    )
     return parser.parse_args()
 
 
@@ -277,10 +294,13 @@ def summarize_numeric(
 
 
 def metric_deltas_vs_reference(metrics: pd.DataFrame, reference_dim: int) -> pd.DataFrame:
-    if "seed" not in metrics.columns or reference_dim not in set(metrics["bottleneck_dim"]):
+    if reference_dim not in set(metrics["bottleneck_dim"]):
         return pd.DataFrame()
 
-    merge_columns = ["seed", "dataset", "method", "score"]
+    merge_columns = ["dataset", "method", "score"]
+    for candidate in ("seed", "cv_seed", "cv_fold"):
+        if candidate in metrics.columns:
+            merge_columns.append(candidate)
     numeric_columns = [
         "validation_f1",
         "validation_precision",
@@ -305,6 +325,137 @@ def metric_deltas_vs_reference(metrics: pd.DataFrame, reference_dim: int) -> pd.
     return deltas
 
 
+def run_grouped_cv_sweep(
+    *,
+    args: argparse.Namespace,
+    seeds: list[int],
+    repo_root: Path,
+    manifest: pd.DataFrame,
+    image_size: tuple[int, int],
+) -> None:
+    all_metric_frames: list[pd.DataFrame] = []
+    all_score_frames: list[pd.DataFrame] = []
+    all_summary_frames: list[pd.DataFrame] = []
+    all_balance_frames: list[pd.DataFrame] = []
+    threshold_payload: dict[str, object] = {
+        "threshold_protocol": "fold_internal_best_f1",
+        "cv_folds": args.cv_folds,
+        "seeds": seeds,
+        "bottleneck_dims": args.dims,
+        "bottleneck_thresholds": {},
+    }
+
+    for seed in seeds:
+        assignments = make_grouped_cv_assignments(manifest, n_splits=args.cv_folds, seed=seed)
+        balance = fold_balance(assignments)
+        balance.insert(0, "cv_seed", seed)
+        all_balance_frames.append(balance)
+
+    for bottleneck_dim in tqdm(
+        args.dims,
+        desc="Grouped-CV bottleneck sweep",
+        unit="dim",
+        disable=not args.progress,
+    ):
+        run_name = f"bn{bottleneck_dim}_grouped_cv"
+        metrics_path = args.output_dir / f"metrics_{run_name}.csv"
+        scores_path = args.output_dir / f"scores_{run_name}.csv"
+        summary_path = args.output_dir / f"metrics_summary_{run_name}.csv"
+        thresholds_path = args.output_dir / f"thresholds_{run_name}.json"
+        cv_model_dir = args.model_dir / run_name if args.save_cv_models else None
+
+        if (
+            metrics_path.exists()
+            and scores_path.exists()
+            and summary_path.exists()
+            and thresholds_path.exists()
+            and not args.overwrite
+        ):
+            print(f"Skipping {run_name}: existing outputs found.", flush=True)
+            metrics_df = pd.read_csv(metrics_path)
+            scores_df = pd.read_csv(scores_path)
+            summary_df = pd.read_csv(summary_path)
+            with thresholds_path.open("r", encoding="utf-8") as file:
+                thresholds = json.load(file)
+        else:
+            print(f"Training grouped CV {run_name}...", flush=True)
+            metrics_df, scores_df, summary_df, thresholds = run_turning_ae_grouped_cv(
+                manifest,
+                repo_root,
+                n_splits=args.cv_folds,
+                seeds=seeds,
+                bottleneck_dim=bottleneck_dim,
+                epochs=args.epochs,
+                patience=args.patience,
+                batch_size=args.batch_size,
+                learning_rate=args.learning_rate,
+                image_size=image_size,
+                n_ver_segments=args.n_ver_segments,
+                ver_top_k=args.ver_top_k,
+                model_dir=cv_model_dir,
+            )
+            metrics_df.to_csv(metrics_path, index=False)
+            scores_df.to_csv(scores_path, index=False)
+            summary_df.to_csv(summary_path, index=False)
+            write_json(thresholds_path, thresholds)
+
+        all_metric_frames.append(metrics_df)
+        all_score_frames.append(scores_df)
+        all_summary_frames.append(summary_df)
+        threshold_payload["bottleneck_thresholds"][str(bottleneck_dim)] = thresholds
+
+    all_metrics = pd.concat(all_metric_frames, ignore_index=True)
+    all_scores = pd.concat(all_score_frames, ignore_index=True)
+    all_summaries = pd.concat(all_summary_frames, ignore_index=True)
+    fold_balance_df = pd.concat(all_balance_frames, ignore_index=True)
+
+    all_metrics.to_csv(args.output_dir / "metrics_grouped_cv_all.csv", index=False)
+    all_scores.to_csv(args.output_dir / "scores_grouped_cv_all.csv", index=False)
+    all_summaries.to_csv(args.output_dir / "metrics_summary_grouped_cv_by_dim.csv", index=False)
+    fold_balance_df.to_csv(args.output_dir / "fold_balance_grouped_cv.csv", index=False)
+    write_json(args.output_dir / "thresholds_grouped_cv_all.json", threshold_payload)
+
+    metrics_summary = summarize_numeric(
+        all_metrics,
+        group_columns=["bottleneck_dim", "dataset", "method", "score"],
+        numeric_columns=[
+            "validation_f1",
+            "validation_precision",
+            "validation_recall",
+            "pr_auc",
+            "f1",
+            "precision",
+            "recall",
+            "tn",
+            "fp",
+            "fn",
+            "tp",
+            "epochs_trained",
+            "best_val_loss",
+        ],
+    )
+    metrics_summary.to_csv(args.output_dir / "metrics_summary_grouped_cv.csv", index=False)
+
+    metric_deltas = metric_deltas_vs_reference(all_metrics, args.reference_dim)
+    if not metric_deltas.empty:
+        metric_deltas.to_csv(
+            args.output_dir / f"metric_deltas_grouped_cv_vs_bn{args.reference_dim}.csv",
+            index=False,
+        )
+        delta_columns = [column for column in metric_deltas.columns if column.endswith("_delta")]
+        metric_delta_summary = summarize_numeric(
+            metric_deltas,
+            group_columns=["reference_dim", "bottleneck_dim", "dataset", "method", "score"],
+            numeric_columns=delta_columns,
+        )
+        metric_delta_summary.to_csv(
+            args.output_dir / f"metric_delta_summary_grouped_cv_vs_bn{args.reference_dim}.csv",
+            index=False,
+        )
+
+    print(f"Wrote grouped-CV sweep outputs to {args.output_dir}", flush=True)
+
+
 def main() -> None:
     args = parse_args()
     seeds = args.seeds if args.seeds is not None else [args.seed]
@@ -316,11 +467,21 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     args.model_dir.mkdir(parents=True, exist_ok=True)
 
-    manifest = pd.read_csv(manifest_path)
-    manifest = manifest[
-        (manifest["source_dataset"] == "turning")
-        & manifest["split"].isin(["validation", "test"])
-        & manifest["image_path"].fillna("").ne("")
+    full_manifest = pd.read_csv(manifest_path)
+    if args.grouped_cv:
+        run_grouped_cv_sweep(
+            args=args,
+            seeds=seeds,
+            repo_root=repo_root,
+            manifest=full_manifest,
+            image_size=image_size,
+        )
+        return
+
+    manifest = full_manifest[
+        (full_manifest["source_dataset"] == "turning")
+        & full_manifest["split"].isin(["validation", "test"])
+        & full_manifest["image_path"].fillna("").ne("")
     ].copy()
     manifest["target"] = (manifest["label"] == "chatter").astype(int)
 
