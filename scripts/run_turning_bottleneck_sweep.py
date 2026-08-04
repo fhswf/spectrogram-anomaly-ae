@@ -400,6 +400,7 @@ def run_grouped_cv_sweep(
                 n_ver_segments=args.n_ver_segments,
                 ver_top_k=args.ver_top_k,
                 model_dir=cv_model_dir,
+                progress=args.progress,
             )
             metrics_df.to_csv(metrics_path, index=False)
             scores_df.to_csv(scores_path, index=False)

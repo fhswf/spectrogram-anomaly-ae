@@ -32,6 +32,90 @@ AE_SCORE_COLUMNS = ["global_mse", "global_mae", "ver_max", "ver_topk"]
 BASELINE_SCORE_NAME = "anomaly_score"
 
 
+class TqdmEpochCallback:
+    def __init__(self, total_epochs: int, desc: str, disable: bool = False) -> None:
+        self.total_epochs = total_epochs
+        self.desc = desc
+        self.disable = disable
+        self.progress = None
+        self.seen_epochs = 0
+
+    def set_model(self, model: object) -> None:
+        self.model = model
+
+    def set_params(self, params: dict | None) -> None:
+        self.params = params or {}
+
+    def on_batch_begin(self, batch: int, logs: dict | None = None) -> None:
+        pass
+
+    def on_batch_end(self, batch: int, logs: dict | None = None) -> None:
+        pass
+
+    def on_epoch_begin(self, epoch: int, logs: dict | None = None) -> None:
+        pass
+
+    def on_train_begin(self, logs: dict | None = None) -> None:
+        if self.disable:
+            return
+        from tqdm.auto import tqdm
+
+        self.progress = tqdm(
+            total=self.total_epochs,
+            desc=self.desc,
+            unit="epoch",
+            leave=False,
+            dynamic_ncols=True,
+        )
+
+    def on_epoch_end(self, epoch: int, logs: dict | None = None) -> None:
+        if self.progress is None:
+            return
+        logs = logs or {}
+        target_seen = epoch + 1
+        self.progress.update(max(0, target_seen - self.seen_epochs))
+        self.seen_epochs = target_seen
+        postfix = {}
+        for key in ("loss", "val_loss"):
+            if key in logs:
+                postfix[key] = f"{logs[key]:.6f}"
+        self.progress.set_postfix(postfix)
+
+    def on_train_end(self, logs: dict | None = None) -> None:
+        if self.progress is not None:
+            self.progress.close()
+
+    def on_train_batch_begin(self, batch: int, logs: dict | None = None) -> None:
+        pass
+
+    def on_train_batch_end(self, batch: int, logs: dict | None = None) -> None:
+        pass
+
+    def on_test_begin(self, logs: dict | None = None) -> None:
+        pass
+
+    def on_test_end(self, logs: dict | None = None) -> None:
+        pass
+
+    def on_test_batch_begin(self, batch: int, logs: dict | None = None) -> None:
+        pass
+
+    def on_test_batch_end(self, batch: int, logs: dict | None = None) -> None:
+        pass
+
+    def on_predict_begin(self, logs: dict | None = None) -> None:
+        pass
+
+    def on_predict_end(self, logs: dict | None = None) -> None:
+        pass
+
+    def on_predict_batch_begin(self, batch: int, logs: dict | None = None) -> None:
+        pass
+
+    def on_predict_batch_end(self, batch: int, logs: dict | None = None) -> None:
+        pass
+
+
 def write_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as file:
@@ -559,6 +643,7 @@ def run_turning_ae_grouped_cv(
     n_ver_segments: int = 10,
     ver_top_k: int = 3,
     model_dir: Path | None = None,
+    progress: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, object]]:
     """Train and evaluate the CNN autoencoder with repeated grouped CV."""
 
@@ -574,114 +659,147 @@ def run_turning_ae_grouped_cv(
     if model_dir is not None:
         model_dir.mkdir(parents=True, exist_ok=True)
 
-    for cv_seed in seeds:
-        assignments = make_grouped_cv_assignments(manifest, n_splits=n_splits, seed=cv_seed)
-        for cv_fold in range(n_splits):
-            tf.keras.backend.clear_session()
-            set_seed(cv_seed + cv_fold)
+    seed_list = list(seeds)
+    fold_jobs = [
+        (cv_seed, cv_fold)
+        for cv_seed in seed_list
+        for cv_fold in range(n_splits)
+    ]
+    if progress:
+        from tqdm.auto import tqdm
 
-            train_nominal = assignments[
-                (assignments["cv_fold"] != cv_fold) & (assignments["target"] == 0)
-            ].reset_index(drop=True)
-            evaluation = assignments[assignments["cv_fold"] == cv_fold].reset_index(drop=True)
+        fold_jobs_iter = tqdm(
+            fold_jobs,
+            desc=f"bn{bottleneck_dim} grouped-CV folds",
+            unit="fold",
+            leave=False,
+            dynamic_ncols=True,
+        )
+    else:
+        fold_jobs_iter = fold_jobs
 
-            train_images, train_rows = load_rgb_images(
-                train_nominal, repo_root, image_size=image_size
-            )
-            eval_images, eval_rows = load_rgb_images(evaluation, repo_root, image_size=image_size)
-            y_eval = eval_rows["target"].to_numpy()
+    assignments_by_seed = {
+        cv_seed: make_grouped_cv_assignments(manifest, n_splits=n_splits, seed=cv_seed)
+        for cv_seed in seed_list
+    }
 
-            x_train, x_stop = train_test_split(
-                train_images,
-                test_size=0.2,
-                random_state=cv_seed + cv_fold,
-                shuffle=True,
-            )
-            model = build_cnn_autoencoder(
-                bottleneck_dim=bottleneck_dim,
-                learning_rate=learning_rate,
-            )
-            callbacks = [
-                tf.keras.callbacks.EarlyStopping(
-                    monitor="val_loss",
-                    patience=patience,
-                    min_delta=1e-6,
-                    restore_best_weights=True,
-                    verbose=0,
-                )
-            ]
-            history = model.fit(
-                x_train,
-                x_train,
-                epochs=epochs,
-                batch_size=batch_size,
-                validation_data=(x_stop, x_stop),
-                shuffle=True,
+    for cv_seed, cv_fold in fold_jobs_iter:
+        assignments = assignments_by_seed[cv_seed]
+        if progress:
+            fold_jobs_iter.set_postfix({"seed": cv_seed, "fold": cv_fold})
+        tf.keras.backend.clear_session()
+        set_seed(cv_seed + cv_fold)
+
+        train_nominal = assignments[
+            (assignments["cv_fold"] != cv_fold) & (assignments["target"] == 0)
+        ].reset_index(drop=True)
+        evaluation = assignments[assignments["cv_fold"] == cv_fold].reset_index(drop=True)
+
+        train_images, train_rows = load_rgb_images(
+            train_nominal, repo_root, image_size=image_size
+        )
+        eval_images, eval_rows = load_rgb_images(evaluation, repo_root, image_size=image_size)
+        y_eval = eval_rows["target"].to_numpy()
+
+        x_train, x_stop = train_test_split(
+            train_images,
+            test_size=0.2,
+            random_state=cv_seed + cv_fold,
+            shuffle=True,
+        )
+        model = build_cnn_autoencoder(
+            bottleneck_dim=bottleneck_dim,
+            learning_rate=learning_rate,
+        )
+        callbacks = [
+            TqdmEpochCallback(
+                total_epochs=epochs,
+                desc=f"bn{bottleneck_dim} seed{cv_seed} fold{cv_fold}",
+                disable=not progress,
+            ),
+            tf.keras.callbacks.EarlyStopping(
+                monitor="val_loss",
+                patience=patience,
+                min_delta=1e-6,
+                restore_best_weights=True,
                 verbose=0,
-                callbacks=callbacks,
+            ),
+        ]
+        history = model.fit(
+            x_train,
+            x_train,
+            epochs=epochs,
+            batch_size=batch_size,
+            validation_data=(x_stop, x_stop),
+            shuffle=True,
+            verbose=0,
+            callbacks=callbacks,
+        )
+
+        if model_dir is not None:
+            model.save(model_dir / f"ae_bn{bottleneck_dim}_turning_cv_seed{cv_seed}_fold{cv_fold}.keras")
+
+        eval_scores = pd.concat(
+            [
+                eval_rows.reset_index(drop=True),
+                score_reconstructions(
+                    model,
+                    eval_images,
+                    n_ver_segments=n_ver_segments,
+                    ver_top_k=ver_top_k,
+                    batch_size=batch_size,
+                ),
+            ],
+            axis=1,
+        )
+
+        fold_thresholds = {}
+        for score_name in AE_SCORE_COLUMNS:
+            values = eval_scores[score_name].to_numpy()
+            selected = select_best_f1_threshold(y_eval, values)
+            metrics = evaluate_at_threshold(y_eval, values, selected["threshold"])
+            row = _metric_row(
+                dataset_name="turning",
+                method="cnn_ae",
+                score_name=score_name,
+                selected=selected,
+                metrics=metrics,
+                cv_seed=cv_seed,
+                cv_fold=cv_fold,
+                train_nominal=train_rows,
+                evaluation=eval_rows,
             )
-
-            if model_dir is not None:
-                model.save(model_dir / f"ae_bn{bottleneck_dim}_turning_cv_seed{cv_seed}_fold{cv_fold}.keras")
-
-            eval_scores = pd.concat(
-                [
-                    eval_rows.reset_index(drop=True),
-                    score_reconstructions(
-                        model,
-                        eval_images,
-                        n_ver_segments=n_ver_segments,
-                        ver_top_k=ver_top_k,
-                        batch_size=batch_size,
-                    ),
-                ],
-                axis=1,
-            )
-
-            fold_thresholds = {}
-            for score_name in AE_SCORE_COLUMNS:
-                values = eval_scores[score_name].to_numpy()
-                selected = select_best_f1_threshold(y_eval, values)
-                metrics = evaluate_at_threshold(y_eval, values, selected["threshold"])
-                row = _metric_row(
-                    dataset_name="turning",
-                    method="cnn_ae",
-                    score_name=score_name,
-                    selected=selected,
-                    metrics=metrics,
-                    cv_seed=cv_seed,
-                    cv_fold=cv_fold,
-                    train_nominal=train_rows,
-                    evaluation=eval_rows,
-                )
-                row.update(
-                    {
-                        "bottleneck_dim": bottleneck_dim,
-                        "epochs_trained": int(len(history.history["loss"])),
-                        "best_val_loss": float(np.min(history.history["val_loss"])),
-                    }
-                )
-                metric_rows.append(row)
-                score_frames.append(
-                    _score_metadata_frame(
-                        eval_rows,
-                        method="cnn_ae",
-                        score_name=score_name,
-                        score_values=values,
-                        cv_seed=cv_seed,
-                        cv_fold=cv_fold,
-                        extra_columns={"bottleneck_dim": bottleneck_dim},
-                    )
-                )
-                fold_thresholds[score_name] = selected
-
-            threshold_payload["folds"].append(
+            row.update(
                 {
-                    "cv_seed": cv_seed,
-                    "cv_fold": cv_fold,
-                    "thresholds": fold_thresholds,
+                    "bottleneck_dim": bottleneck_dim,
+                    "epochs_trained": int(len(history.history["loss"])),
+                    "best_val_loss": float(np.min(history.history["val_loss"])),
                 }
             )
+            metric_rows.append(row)
+            score_frames.append(
+                _score_metadata_frame(
+                    eval_rows,
+                    method="cnn_ae",
+                    score_name=score_name,
+                    score_values=values,
+                    cv_seed=cv_seed,
+                    cv_fold=cv_fold,
+                    extra_columns={"bottleneck_dim": bottleneck_dim},
+                )
+            )
+            fold_thresholds[score_name] = selected
+
+        threshold_payload["folds"].append(
+            {
+                "cv_seed": cv_seed,
+                "cv_fold": cv_fold,
+                "thresholds": fold_thresholds,
+            }
+        )
+
+    if progress and hasattr(fold_jobs_iter, "close"):
+        fold_jobs_iter.close()
 
     metrics_df = pd.DataFrame(metric_rows)
     scores_df = pd.concat(score_frames, ignore_index=True)
