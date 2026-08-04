@@ -8,6 +8,8 @@ import random
 from pathlib import Path
 from typing import Callable, Iterable
 
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "1")
+
 import numpy as np
 import pandas as pd
 from PIL import Image
@@ -255,8 +257,13 @@ def score_reconstructions(
     *,
     n_ver_segments: int = 10,
     ver_top_k: int = 3,
+    batch_size: int = 32,
 ) -> pd.DataFrame:
-    recon = model.predict(images, verbose=0)
+    recon_batches = []
+    for start in range(0, len(images), batch_size):
+        batch = images[start : start + batch_size]
+        recon_batches.append(np.asarray(model(batch, training=False)))
+    recon = np.concatenate(recon_batches, axis=0)
     squared_error = (images - recon) ** 2
     absolute_error = np.abs(images - recon)
     ver_max, ver_topk = vertical_segment_scores(squared_error, n_ver_segments, ver_top_k)
@@ -625,6 +632,7 @@ def run_turning_ae_grouped_cv(
                         eval_images,
                         n_ver_segments=n_ver_segments,
                         ver_top_k=ver_top_k,
+                        batch_size=batch_size,
                     ),
                 ],
                 axis=1,

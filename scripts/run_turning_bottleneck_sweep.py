@@ -6,6 +6,8 @@ import os
 import random
 from pathlib import Path
 
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "1")
+
 import numpy as np
 import pandas as pd
 import tensorflow as tf
@@ -189,8 +191,13 @@ def score_reconstructions(
     images: np.ndarray,
     n_ver_segments: int,
     ver_top_k: int,
+    batch_size: int = 32,
 ) -> pd.DataFrame:
-    recon = model.predict(images, verbose=0)
+    recon_batches = []
+    for start in range(0, len(images), batch_size):
+        batch = images[start : start + batch_size]
+        recon_batches.append(np.asarray(model(batch, training=False)))
+    recon = np.concatenate(recon_batches, axis=0)
     squared_error = (images - recon) ** 2
     absolute_error = np.abs(images - recon)
     ver_max, ver_topk = vertical_segment_scores(squared_error, n_ver_segments, ver_top_k)
@@ -573,21 +580,35 @@ def main() -> None:
         model.save(model_path)
 
         internal_train_scores = score_reconstructions(
-            model, x_train, args.n_ver_segments, args.ver_top_k
+            model, x_train, args.n_ver_segments, args.ver_top_k, args.batch_size
         )
-        internal_val_scores = score_reconstructions(model, x_val, args.n_ver_segments, args.ver_top_k)
+        internal_val_scores = score_reconstructions(
+            model, x_val, args.n_ver_segments, args.ver_top_k, args.batch_size
+        )
 
         validation_scores = pd.concat(
             [
                 validation_rows.reset_index(drop=True),
-                score_reconstructions(model, validation_images, args.n_ver_segments, args.ver_top_k),
+                score_reconstructions(
+                    model,
+                    validation_images,
+                    args.n_ver_segments,
+                    args.ver_top_k,
+                    args.batch_size,
+                ),
             ],
             axis=1,
         )
         test_scores = pd.concat(
             [
                 test_rows.reset_index(drop=True),
-                score_reconstructions(model, test_images, args.n_ver_segments, args.ver_top_k),
+                score_reconstructions(
+                    model,
+                    test_images,
+                    args.n_ver_segments,
+                    args.ver_top_k,
+                    args.batch_size,
+                ),
             ],
             axis=1,
         )

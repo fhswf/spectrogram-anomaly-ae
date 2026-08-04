@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 from spectrogram_anomaly_ae.turning_cv import (
     fold_balance,
     make_grouped_cv_assignments,
+    score_reconstructions,
     summarize_cv_metrics,
 )
 
@@ -75,3 +77,33 @@ def test_summarize_cv_metrics_adds_ci_columns() -> None:
     assert summary.loc[0, "f1_count"] == 2
     assert summary.loc[0, "f1_mean"] == 0.6
     assert "f1_ci95" in summary.columns
+
+
+class FakeInferenceModel:
+    def __init__(self) -> None:
+        self.batch_sizes: list[int] = []
+
+    def __call__(self, batch: np.ndarray, *, training: bool) -> np.ndarray:
+        assert training is False
+        self.batch_sizes.append(len(batch))
+        return np.zeros_like(batch)
+
+    def predict(self, *_args: object, **_kwargs: object) -> np.ndarray:
+        raise AssertionError("score_reconstructions should use direct inference, not predict")
+
+
+def test_score_reconstructions_uses_direct_batched_inference() -> None:
+    model = FakeInferenceModel()
+    images = np.ones((5, 4, 6, 3), dtype="float32")
+
+    scores = score_reconstructions(
+        model,
+        images,
+        n_ver_segments=3,
+        ver_top_k=2,
+        batch_size=2,
+    )
+
+    assert model.batch_sizes == [2, 2, 1]
+    assert list(scores.columns) == ["global_mse", "global_mae", "ver_max", "ver_topk"]
+    assert np.allclose(scores["global_mse"], 1.0)
