@@ -1,0 +1,38 @@
+\begin{table*}[t]
+\centering
+\small
+\setlength{\tabcolsep}{3.5pt}
+\caption{Grouped 5-fold cross-validation performance on the turning dataset. Values denote mean $\pm$ approximate 95\% cross-validation variability intervals across folds. Precision, recall, and F1 are computed using fold-internal best-F1 thresholds; PR-AUC is threshold-free.}
+\label{tab:turning_bottleneck_baseline_cv}
+\begin{tabular}{@{}llcccc@{}}
+\toprule
+Method & Score & Precision & Recall & F1 & PR-AUC \\
+\midrule
+CNN-AE (BN=16) & global\_mae & 0.815 $\pm$ 0.125 & 0.895 $\pm$ 0.086 & 0.851 $\pm$ 0.104 & 0.857 $\pm$ 0.123 \\
+CNN-AE (BN=16) & global\_mse & 0.771 $\pm$ 0.131 & 0.948 $\pm$ 0.043 & 0.846 $\pm$ 0.096 & 0.846 $\pm$ 0.113 \\
+CNN-AE (BN=16) & ver\_max & 0.708 $\pm$ 0.194 & 0.982 $\pm$ 0.036 & 0.806 $\pm$ 0.136 & 0.735 $\pm$ 0.166 \\
+CNN-AE (BN=16) & ver\_topk & 0.750 $\pm$ 0.186 & 0.949 $\pm$ 0.070 & 0.825 $\pm$ 0.130 & 0.787 $\pm$ 0.127 \\
+\addlinespace
+CNN-AE (BN=32) & global\_mae & 0.816 $\pm$ 0.095 & 0.881 $\pm$ 0.096 & 0.847 $\pm$ 0.094 & 0.855 $\pm$ 0.129 \\
+CNN-AE (BN=32) & global\_mse & 0.791 $\pm$ 0.172 & 0.968 $\pm$ 0.039 & 0.861 $\pm$ 0.113 & 0.856 $\pm$ 0.115 \\
+CNN-AE (BN=32) & ver\_max & 0.756 $\pm$ 0.181 & 0.953 $\pm$ 0.058 & 0.833 $\pm$ 0.127 & 0.755 $\pm$ 0.172 \\
+CNN-AE (BN=32) & ver\_topk & 0.767 $\pm$ 0.168 & 0.949 $\pm$ 0.070 & 0.839 $\pm$ 0.117 & 0.805 $\pm$ 0.155 \\
+\addlinespace
+CNN-AE (BN=64) & global\_mae & 0.825 $\pm$ 0.087 & 0.863 $\pm$ 0.079 & 0.843 $\pm$ 0.080 & 0.843 $\pm$ 0.127 \\
+CNN-AE (BN=64) & global\_mse & 0.811 $\pm$ 0.108 & 0.933 $\pm$ 0.056 & 0.865 $\pm$ 0.080 & 0.855 $\pm$ 0.105 \\
+CNN-AE (BN=64) & ver\_max & 0.791 $\pm$ 0.127 & 0.953 $\pm$ 0.058 & 0.859 $\pm$ 0.087 & 0.799 $\pm$ 0.133 \\
+CNN-AE (BN=64) & ver\_topk & 0.789 $\pm$ 0.127 & 0.915 $\pm$ 0.073 & 0.844 $\pm$ 0.100 & 0.827 $\pm$ 0.134 \\
+\addlinespace
+CNN-AE (BN=128) & global\_mae & 0.798 $\pm$ 0.132 & 0.964 $\pm$ 0.071 & 0.868 $\pm$ 0.093 & 0.849 $\pm$ 0.136 \\
+CNN-AE (BN=128) & global\_mse & 0.780 $\pm$ 0.119 & 0.982 $\pm$ 0.036 & 0.865 $\pm$ 0.078 & 0.824 $\pm$ 0.090 \\
+CNN-AE (BN=128) & ver\_max & 0.758 $\pm$ 0.163 & 0.982 $\pm$ 0.036 & 0.845 $\pm$ 0.108 & 0.763 $\pm$ 0.131 \\
+CNN-AE (BN=128) & ver\_topk & 0.773 $\pm$ 0.160 & 0.944 $\pm$ 0.072 & 0.843 $\pm$ 0.114 & 0.788 $\pm$ 0.120 \\
+\addlinespace
+Isolation forest & anomaly\_score & 0.873 $\pm$ 0.130 & 0.924 $\pm$ 0.092 & 0.891 $\pm$ 0.087 & 0.897 $\pm$ 0.105 \\
+\addlinespace
+One-class SVM & anomaly\_score & 0.883 $\pm$ 0.088 & 0.878 $\pm$ 0.097 & 0.880 $\pm$ 0.090 & 0.887 $\pm$ 0.089 \\
+\addlinespace
+PCA reconstruction & reconstruction\_mse & 0.625 $\pm$ 0.167 & 0.982 $\pm$ 0.036 & 0.749 $\pm$ 0.117 & 0.637 $\pm$ 0.114 \\
+\bottomrule
+\end{tabular}
+\end{table*}
