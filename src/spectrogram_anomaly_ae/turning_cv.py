@@ -7,6 +7,7 @@ import multiprocessing as mp
 import os
 import random
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from contextlib import ExitStack
 from itertools import combinations
 from pathlib import Path
 from typing import Callable, Iterable
@@ -34,6 +35,7 @@ from sklearn.svm import OneClassSVM
 AE_SCORE_COLUMNS = ["global_mse", "global_mae", "ver_max", "ver_topk"]
 BASELINE_SCORE_NAME = "anomaly_score"
 NESTED_THRESHOLD_PROTOCOL = "nested_grouped_reused_pairwise_inner_best_f1"
+_WORKER_GPU_INDEX: int | None = None
 
 
 class TqdmEpochCallback:
@@ -240,14 +242,23 @@ def _fold_pairs(n_splits: int) -> list[tuple[int, int]]:
 def _configure_worker_gpu(tf: object, gpu_index: int | None) -> None:
     """Restrict a spawned worker to one logical GPU before model creation."""
 
+    global _WORKER_GPU_INDEX
     if gpu_index is None:
         return
+    if _WORKER_GPU_INDEX == gpu_index:
+        return
+    if _WORKER_GPU_INDEX is not None:
+        raise RuntimeError(
+            f"Worker is already bound to GPU {_WORKER_GPU_INDEX}; "
+            f"cannot switch it to GPU {gpu_index}."
+        )
     gpus = tf.config.list_physical_devices("GPU")
     if gpu_index >= len(gpus):
         raise RuntimeError(
             f"Worker requested GPU {gpu_index}, but only {len(gpus)} GPUs are visible."
         )
     tf.config.set_visible_devices(gpus[gpu_index], "GPU")
+    _WORKER_GPU_INDEX = gpu_index
 
 
 def _run_parallel_jobs(
@@ -262,24 +273,34 @@ def _run_parallel_jobs(
 
     if gpu_count < 2:
         raise ValueError("Parallel GPU execution requires at least two GPUs.")
+    if not jobs:
+        return []
 
     context = mp.get_context("spawn")
     results: list[dict[str, object]] = []
-    with ProcessPoolExecutor(
-        max_workers=gpu_count,
-        mp_context=context,
-    ) as executor:
+    # A normal pool may schedule a later task on a process that was initially
+    # assigned to another GPU. One single-worker pool per GPU keeps the device
+    # binding stable for the lifetime of each spawned TensorFlow process.
+    worker_count = min(gpu_count, len(jobs))
+    with ExitStack() as stack:
+        executors = [
+            stack.enter_context(
+                ProcessPoolExecutor(max_workers=1, mp_context=context)
+            )
+            for _ in range(worker_count)
+        ]
         futures = {}
         for job_index, job in enumerate(jobs):
             assigned_job = dict(job)
-            assigned_job["gpu_index"] = job_index % gpu_count
+            gpu_index = job_index % worker_count
+            assigned_job["gpu_index"] = gpu_index
             if progress:
                 print(
                     f"Starting {assigned_job['description']} on GPU "
                     f"{assigned_job['gpu_index']}",
                     flush=True,
                 )
-            future = executor.submit(worker, assigned_job)
+            future = executors[gpu_index].submit(worker, assigned_job)
             futures[future] = assigned_job
 
         completed = as_completed(futures)
@@ -1284,6 +1305,12 @@ def run_turning_ae_grouped_cv(
             "using sequential training.",
             flush=True,
         )
+    threshold_payload.update(
+        {
+            "gpu_count": gpu_count,
+            "parallel_gpus": use_parallel_gpus,
+        }
+    )
     pairwise_scores_by_seed = {}
     for cv_seed in seed_list:
         if use_parallel_gpus:
