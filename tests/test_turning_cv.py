@@ -92,13 +92,20 @@ def test_turning_baseline_grouped_cv_uses_inner_thresholds(tmp_path, monkeypatch
         Image.fromarray(image.astype(np.uint8)).save(image_path)
 
     threshold_selection_lengths = []
+    baseline_score_calls = []
     original_selector = turning_cv.select_best_f1_threshold
+    original_scorer = turning_cv._score_turning_baselines
 
     def recording_selector(y_true, scores):
         threshold_selection_lengths.append(len(y_true))
         return original_selector(y_true, scores)
 
+    def recording_scorer(*args, **kwargs):
+        baseline_score_calls.append((len(args[0]), len(args[1])))
+        return original_scorer(*args, **kwargs)
+
     monkeypatch.setattr(turning_cv, "select_best_f1_threshold", recording_selector)
+    monkeypatch.setattr(turning_cv, "_score_turning_baselines", recording_scorer)
 
     metrics, scores, summary, thresholds = run_turning_baseline_grouped_cv(
         manifest,
@@ -118,8 +125,9 @@ def test_turning_baseline_grouped_cv_uses_inner_thresholds(tmp_path, monkeypatch
     assert len(metrics) == 9
     assert set(scores["method"]) == set(metrics["method"])
     assert not summary.empty
-    assert thresholds["threshold_protocol"] == "nested_grouped_inner_best_f1"
-    assert thresholds["inner_cv_folds"] == 3
+    assert len(baseline_score_calls) == 6  # 3 pairwise inner + 3 outer models
+    assert thresholds["threshold_protocol"] == "nested_grouped_reused_pairwise_inner_best_f1"
+    assert thresholds["inner_cv_folds"] == 2
     assert len(thresholds["folds"]) == 3
     assignments = make_grouped_cv_assignments(manifest, n_splits=3, seed=7)
     expected_lengths = [
@@ -140,10 +148,11 @@ def test_turning_ae_nested_threshold_helper_uses_inner_scores(tmp_path, monkeypa
         Image.fromarray(image).save(image_path)
 
     assignments = make_grouped_cv_assignments(manifest, n_splits=3, seed=7)
-    outer_training = assignments[assignments["cv_fold"] != 0].reset_index(drop=True)
     threshold_selection_lengths = []
+    fit_calls = []
 
     def fake_fit(*_args, **_kwargs):
+        fit_calls.append(1)
         return object(), pd.DataFrame(), object()
 
     def fake_score(_model, images, **_kwargs):
@@ -160,12 +169,11 @@ def test_turning_ae_nested_threshold_helper_uses_inner_scores(tmp_path, monkeypa
     monkeypatch.setattr(turning_cv, "score_reconstructions", fake_score)
     monkeypatch.setattr(turning_cv, "select_best_f1_threshold", recording_selector)
 
-    _, metadata = turning_cv._select_nested_ae_thresholds(
-        outer_training,
+    pairwise_scores = turning_cv._build_pairwise_ae_scores(
+        assignments,
         tmp_path,
-        outer_seed=7,
-        outer_fold=0,
-        inner_splits=3,
+        cv_seed=7,
+        n_splits=3,
         bottleneck_dim=8,
         epochs=1,
         patience=1,
@@ -175,10 +183,19 @@ def test_turning_ae_nested_threshold_helper_uses_inner_scores(tmp_path, monkeypa
         n_ver_segments=3,
         ver_top_k=2,
         tf=object(),
+        progress=False,
+    )
+    _, metadata = turning_cv._select_thresholds_from_pairwise_scores(
+        pairwise_scores,
+        outer_fold=0,
+        score_columns=turning_cv.AE_SCORE_COLUMNS,
     )
 
+    outer_training = assignments[assignments["cv_fold"] != 0]
+    assert len(pairwise_scores) == 3  # C(3, 2), each reused for two outer folds
+    assert len(fit_calls) == 3
     assert threshold_selection_lengths == [len(outer_training)] * 4
-    assert metadata["n_splits"] == 3
+    assert metadata["n_splits"] == 2
     assert metadata["n_samples"] == len(outer_training)
 
 

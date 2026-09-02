@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import multiprocessing as mp
 import os
 import random
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from itertools import combinations
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -30,6 +33,7 @@ from sklearn.svm import OneClassSVM
 
 AE_SCORE_COLUMNS = ["global_mse", "global_mae", "ver_max", "ver_topk"]
 BASELINE_SCORE_NAME = "anomaly_score"
+NESTED_THRESHOLD_PROTOCOL = "nested_grouped_reused_pairwise_inner_best_f1"
 
 
 class TqdmEpochCallback:
@@ -208,6 +212,103 @@ def fold_balance(assignments: pd.DataFrame) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
+
+
+def _resolve_reusable_inner_splits(n_splits: int, inner_splits: int | None) -> int:
+    """Require inner CV to reuse the fixed outer fold partition."""
+
+    expected = n_splits - 1
+    if expected < 2:
+        raise ValueError("Reusable nested grouped CV requires at least 3 outer folds.")
+    resolved = expected if inner_splits is None else inner_splits
+    if resolved != expected:
+        raise ValueError(
+            "Reusable nested grouped CV requires inner_cv_folds="
+            f"n_splits - 1 ({expected}); got {resolved}."
+        )
+    return resolved
+
+
+def _fold_pair(first: int, second: int) -> tuple[int, int]:
+    return (first, second) if first < second else (second, first)
+
+
+def _fold_pairs(n_splits: int) -> list[tuple[int, int]]:
+    return list(combinations(range(n_splits), 2))
+
+
+def _configure_worker_gpu(tf: object, gpu_index: int | None) -> None:
+    """Restrict a spawned worker to one logical GPU before model creation."""
+
+    if gpu_index is None:
+        return
+    gpus = tf.config.list_physical_devices("GPU")
+    if gpu_index >= len(gpus):
+        raise RuntimeError(
+            f"Worker requested GPU {gpu_index}, but only {len(gpus)} GPUs are visible."
+        )
+    tf.config.set_visible_devices(gpus[gpu_index], "GPU")
+
+
+def _run_parallel_jobs(
+    worker: Callable[[dict[str, object]], dict[str, object]],
+    jobs: list[dict[str, object]],
+    *,
+    gpu_count: int,
+    progress: bool,
+    description: str,
+) -> list[dict[str, object]]:
+    """Run independent TensorFlow jobs concurrently, one per GPU."""
+
+    if gpu_count < 2:
+        raise ValueError("Parallel GPU execution requires at least two GPUs.")
+
+    context = mp.get_context("spawn")
+    results: list[dict[str, object]] = []
+    with ProcessPoolExecutor(
+        max_workers=gpu_count,
+        mp_context=context,
+    ) as executor:
+        futures = {}
+        for job_index, job in enumerate(jobs):
+            assigned_job = dict(job)
+            assigned_job["gpu_index"] = job_index % gpu_count
+            if progress:
+                print(
+                    f"Starting {assigned_job['description']} on GPU "
+                    f"{assigned_job['gpu_index']}",
+                    flush=True,
+                )
+            future = executor.submit(worker, assigned_job)
+            futures[future] = assigned_job
+
+        completed = as_completed(futures)
+        if progress:
+            from tqdm.auto import tqdm
+
+            completed = tqdm(
+                completed,
+                total=len(futures),
+                desc=description,
+                unit="model",
+                leave=False,
+                dynamic_ncols=True,
+            )
+        for future in completed:
+            result = future.result()
+            results.append(result)
+            if progress:
+                print(f"Completed {result['description']}", flush=True)
+    return results
+
+
+def _spawn_workers_available() -> bool:
+    """Return whether the current entry point can be imported by spawn workers."""
+
+    import __main__
+
+    main_file = getattr(__main__, "__file__", None)
+    return bool(main_file and Path(main_file).exists())
 
 
 def load_rgb_images(
@@ -544,62 +645,90 @@ def _score_turning_baselines(
     return scores
 
 
-def _select_nested_thresholds(
-    outer_training: pd.DataFrame,
-    repo_root: Path,
+def _select_thresholds_from_pairwise_scores(
+    pairwise_scores: dict[tuple[int, int], pd.DataFrame],
     *,
-    outer_seed: int,
     outer_fold: int,
-    inner_splits: int,
-    image_size: tuple[int, int],
-    pca_components: int,
+    score_columns: Iterable[str],
 ) -> tuple[dict[str, dict[str, float]], dict[str, int]]:
-    """Select thresholds from grouped inner out-of-fold scores only."""
+    """Select thresholds from pairwise inner scores excluding one outer fold.
 
-    inner_assignments = make_grouped_cv_assignments(
-        outer_training,
-        n_splits=inner_splits,
-        seed=outer_seed + outer_fold,
-    )
-    inner_scores: dict[str, list[np.ndarray]] = {}
-    inner_targets: list[np.ndarray] = []
-    inner_validation = []
+    A pairwise score frame contains predictions for both folds omitted when its
+    model was trained. For a given outer fold, only the other omitted fold is
+    used as inner validation data. Thus every score used for threshold
+    selection comes from a model trained without the outer evaluation fold.
+    """
 
-    for inner_fold in range(inner_splits):
-        inner_train_nominal = inner_assignments[
-            (inner_assignments["cv_fold"] != inner_fold)
-            & (inner_assignments["target"] == 0)
-        ].reset_index(drop=True)
-        validation = inner_assignments[
-            inner_assignments["cv_fold"] == inner_fold
-        ].reset_index(drop=True)
-        scores = _score_turning_baselines(
-            inner_train_nominal,
-            validation,
-            repo_root,
-            image_size=image_size,
-            pca_components=pca_components,
-            random_state=outer_seed + outer_fold * inner_splits + inner_fold,
-        )
-        for method, values in scores.items():
-            inner_scores.setdefault(method, []).append(values)
-        inner_targets.append(validation["target"].to_numpy())
-        inner_validation.append(validation)
-
-    y_inner = np.concatenate(inner_targets)
-    thresholds = {
-        method: select_best_f1_threshold(y_inner, np.concatenate(values))
-        for method, values in inner_scores.items()
+    inner_validation: list[pd.DataFrame] = []
+    inner_scores: dict[str, list[np.ndarray]] = {
+        score_name: [] for score_name in score_columns
     }
+    n_splits = len({fold for pair in pairwise_scores for fold in pair})
+
+    for inner_fold in range(n_splits):
+        if inner_fold == outer_fold:
+            continue
+        pair = _fold_pair(outer_fold, inner_fold)
+        pair_scores = pairwise_scores[pair]
+        validation = pair_scores[pair_scores["cv_fold"] == inner_fold].reset_index(drop=True)
+        if validation.empty:
+            raise RuntimeError(
+                f"No cached inner scores for outer fold {outer_fold}, "
+                f"inner fold {inner_fold}."
+            )
+        inner_validation.append(validation)
+        for score_name in score_columns:
+            inner_scores[score_name].append(validation[score_name].to_numpy())
+
     validation_rows = pd.concat(inner_validation, ignore_index=True)
+    y_inner = validation_rows["target"].to_numpy()
+    thresholds = {
+        score_name: select_best_f1_threshold(y_inner, np.concatenate(values))
+        for score_name, values in inner_scores.items()
+    }
     metadata = {
-        "n_splits": inner_splits,
+        "n_splits": n_splits - 1,
         "n_samples": int(len(validation_rows)),
         "n_chatter": int((validation_rows["target"] == 1).sum()),
         "n_no_chatter": int((validation_rows["target"] == 0).sum()),
         "n_runs": int(validation_rows["source_run"].nunique()),
     }
     return thresholds, metadata
+
+
+def _build_pairwise_baseline_scores(
+    assignments: pd.DataFrame,
+    repo_root: Path,
+    *,
+    cv_seed: int,
+    n_splits: int,
+    image_size: tuple[int, int],
+    pca_components: int,
+) -> dict[tuple[int, int], pd.DataFrame]:
+    """Fit each reusable inner baseline model once and score both held-out folds."""
+
+    pairwise_scores: dict[tuple[int, int], pd.DataFrame] = {}
+    for first_fold, second_fold in _fold_pairs(n_splits):
+        held_out = assignments[
+            assignments["cv_fold"].isin([first_fold, second_fold])
+        ].reset_index(drop=True)
+        train_nominal = assignments[
+            (~assignments["cv_fold"].isin([first_fold, second_fold]))
+            & (assignments["target"] == 0)
+        ].reset_index(drop=True)
+        scores = _score_turning_baselines(
+            train_nominal,
+            held_out,
+            repo_root,
+            image_size=image_size,
+            pca_components=pca_components,
+            random_state=cv_seed + first_fold * n_splits + second_fold,
+        )
+        pair_scores = held_out.copy()
+        for method, values in scores.items():
+            pair_scores[method] = values
+        pairwise_scores[(first_fold, second_fold)] = pair_scores
+    return pairwise_scores
 
 
 def run_turning_baseline_grouped_cv(
@@ -612,39 +741,48 @@ def run_turning_baseline_grouped_cv(
     image_size: tuple[int, int] = (150, 100),
     pca_components: int = 32,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, object]]:
-    """Run nested grouped CV for turning descriptor/PCA baselines."""
+    """Run nested grouped CV for turning descriptor/PCA baselines.
 
-    if inner_splits is None:
-        inner_splits = n_splits
-    if inner_splits < 2:
-        raise ValueError("inner_splits must be at least 2.")
+    The fixed outer fold assignment is also used for inner CV. Each model
+    trained on all folds except a pair of folds is fitted once and reused for
+    both possible outer-fold threshold selections.
+    """
+
+    inner_splits = _resolve_reusable_inner_splits(n_splits, inner_splits)
 
     metric_rows: list[dict[str, object]] = []
     score_frames: list[pd.DataFrame] = []
     threshold_payload: dict[str, object] = {
-        "threshold_protocol": "nested_grouped_inner_best_f1",
+        "threshold_protocol": NESTED_THRESHOLD_PROTOCOL,
         "inner_cv_folds": inner_splits,
         "folds": [],
     }
 
     for cv_seed in seeds:
         assignments = make_grouped_cv_assignments(manifest, n_splits=n_splits, seed=cv_seed)
+        pairwise_scores = _build_pairwise_baseline_scores(
+            assignments,
+            repo_root,
+            cv_seed=cv_seed,
+            n_splits=n_splits,
+            image_size=image_size,
+            pca_components=pca_components,
+        )
         for cv_fold in range(n_splits):
             train_nominal = assignments[
                 (assignments["cv_fold"] != cv_fold) & (assignments["target"] == 0)
             ].reset_index(drop=True)
-            outer_training = assignments[assignments["cv_fold"] != cv_fold].reset_index(drop=True)
             evaluation = assignments[assignments["cv_fold"] == cv_fold].reset_index(drop=True)
             y_eval = evaluation["target"].to_numpy()
 
-            nested_thresholds, inner_metadata = _select_nested_thresholds(
-                outer_training,
-                repo_root,
-                outer_seed=cv_seed,
+            nested_thresholds, inner_metadata = _select_thresholds_from_pairwise_scores(
+                pairwise_scores,
                 outer_fold=cv_fold,
-                inner_splits=inner_splits,
-                image_size=image_size,
-                pca_components=pca_components,
+                score_columns=[
+                    "one_class_svm_image_features",
+                    "isolation_forest_image_features",
+                    "pca_image_reconstruction",
+                ],
             )
             outer_scores = _score_turning_baselines(
                 train_nominal,
@@ -674,7 +812,7 @@ def run_turning_baseline_grouped_cv(
                         cv_fold=cv_fold,
                         train_nominal=train_nominal,
                         evaluation=evaluation,
-                        threshold_protocol="nested_grouped_inner_best_f1",
+                        threshold_protocol=NESTED_THRESHOLD_PROTOCOL,
                     )
                 )
                 score_frames.append(
@@ -704,7 +842,7 @@ def run_turning_baseline_grouped_cv(
                     cv_fold=cv_fold,
                     train_nominal=train_nominal,
                     evaluation=evaluation,
-                    threshold_protocol="nested_grouped_inner_best_f1",
+                    threshold_protocol=NESTED_THRESHOLD_PROTOCOL,
                 )
             )
             score_frames.append(
@@ -757,6 +895,12 @@ def _fit_turning_ae_model(
     train_images, train_rows = load_rgb_images(
         train_nominal, repo_root, image_size=image_size
     )
+    if progress:
+        print(
+            f"Starting {description}: {len(train_images)} nominal images, "
+            f"up to {epochs} epochs",
+            flush=True,
+        )
     x_train, x_stop = train_test_split(
         train_images,
         test_size=0.2,
@@ -791,16 +935,21 @@ def _fit_turning_ae_model(
         verbose=0,
         callbacks=callbacks,
     )
+    if progress:
+        print(
+            f"Completed {description}: {len(history.history['loss'])} epochs, "
+            f"best val_loss={np.min(history.history['val_loss']):.6f}",
+            flush=True,
+        )
     return model, train_rows, history
 
 
-def _select_nested_ae_thresholds(
-    outer_training: pd.DataFrame,
+def _build_pairwise_ae_scores(
+    assignments: pd.DataFrame,
     repo_root: Path,
     *,
-    outer_seed: int,
-    outer_fold: int,
-    inner_splits: int,
+    cv_seed: int,
+    n_splits: int,
     bottleneck_dim: int,
     epochs: int,
     patience: int,
@@ -810,28 +959,22 @@ def _select_nested_ae_thresholds(
     n_ver_segments: int,
     ver_top_k: int,
     tf: object,
-) -> tuple[dict[str, dict[str, float]], dict[str, int]]:
-    """Select AE thresholds from grouped inner out-of-fold scores only."""
+    progress: bool,
+) -> dict[tuple[int, int], pd.DataFrame]:
+    """Fit reusable pairwise inner AE models and score both held-out folds."""
 
-    inner_assignments = make_grouped_cv_assignments(
-        outer_training,
-        n_splits=inner_splits,
-        seed=outer_seed + outer_fold,
-    )
-    inner_scores: dict[str, list[np.ndarray]] = {}
-    inner_targets: list[np.ndarray] = []
-    inner_validation_rows = []
-
-    for inner_fold in range(inner_splits):
-        inner_train_nominal = inner_assignments[
-            (inner_assignments["cv_fold"] != inner_fold)
-            & (inner_assignments["target"] == 0)
+    pairwise_scores: dict[tuple[int, int], pd.DataFrame] = {}
+    pairs = _fold_pairs(n_splits)
+    for pair_index, (first_fold, second_fold) in enumerate(pairs, start=1):
+        train_nominal = assignments[
+            (~assignments["cv_fold"].isin([first_fold, second_fold]))
+            & (assignments["target"] == 0)
         ].reset_index(drop=True)
-        validation = inner_assignments[
-            inner_assignments["cv_fold"] == inner_fold
+        held_out = assignments[
+            assignments["cv_fold"].isin([first_fold, second_fold])
         ].reset_index(drop=True)
         model, _, _ = _fit_turning_ae_model(
-            inner_train_nominal,
+            train_nominal,
             repo_root,
             bottleneck_dim=bottleneck_dim,
             epochs=epochs,
@@ -839,41 +982,247 @@ def _select_nested_ae_thresholds(
             batch_size=batch_size,
             learning_rate=learning_rate,
             image_size=image_size,
-            seed=outer_seed + outer_fold * inner_splits + inner_fold,
-            description=f"bn{bottleneck_dim} inner seed{outer_seed} fold{outer_fold}/{inner_fold}",
-            progress=False,
+            seed=cv_seed + first_fold * n_splits + second_fold,
+            description=(
+                f"bn{bottleneck_dim} inner {pair_index}/{len(pairs)} "
+                f"seed{cv_seed} folds{first_fold}+{second_fold}"
+            ),
+            progress=progress,
             tf=tf,
         )
-        validation_images, validation_rows = load_rgb_images(
-            validation, repo_root, image_size=image_size
+        held_out_images, held_out_rows = load_rgb_images(
+            held_out, repo_root, image_size=image_size
         )
         scores = score_reconstructions(
             model,
-            validation_images,
+            held_out_images,
             n_ver_segments=n_ver_segments,
             ver_top_k=ver_top_k,
             batch_size=batch_size,
         )
-        for score_name in AE_SCORE_COLUMNS:
-            inner_scores.setdefault(score_name, []).append(scores[score_name].to_numpy())
-        inner_targets.append(validation_rows["target"].to_numpy())
-        inner_validation_rows.append(validation_rows)
+        pair_scores = pd.concat(
+            [
+                held_out_rows.reset_index(drop=True),
+                scores.reset_index(drop=True),
+            ],
+            axis=1,
+        )
+        pairwise_scores[(first_fold, second_fold)] = pair_scores
         del model
+    return pairwise_scores
 
-    y_inner = np.concatenate(inner_targets)
-    thresholds = {
-        score_name: select_best_f1_threshold(y_inner, np.concatenate(values))
-        for score_name, values in inner_scores.items()
+
+def _pairwise_ae_worker(job: dict[str, object]) -> dict[str, object]:
+    """Train one pairwise inner AE model in a GPU-isolated worker."""
+
+    import tensorflow as tf
+
+    _configure_worker_gpu(tf, job["gpu_index"])
+    assignments = job["assignments"]
+    first_fold = job["first_fold"]
+    second_fold = job["second_fold"]
+    train_nominal = assignments[
+        (~assignments["cv_fold"].isin([first_fold, second_fold]))
+        & (assignments["target"] == 0)
+    ].reset_index(drop=True)
+    held_out = assignments[
+        assignments["cv_fold"].isin([first_fold, second_fold])
+    ].reset_index(drop=True)
+    model, _, _ = _fit_turning_ae_model(
+        train_nominal,
+        job["repo_root"],
+        bottleneck_dim=job["bottleneck_dim"],
+        epochs=job["epochs"],
+        patience=job["patience"],
+        batch_size=job["batch_size"],
+        learning_rate=job["learning_rate"],
+        image_size=job["image_size"],
+        seed=job["seed"],
+        description=job["description"],
+        progress=False,
+        tf=tf,
+    )
+    held_out_images, held_out_rows = load_rgb_images(
+        held_out, job["repo_root"], image_size=job["image_size"]
+    )
+    scores = score_reconstructions(
+        model,
+        held_out_images,
+        n_ver_segments=job["n_ver_segments"],
+        ver_top_k=job["ver_top_k"],
+        batch_size=job["batch_size"],
+    )
+    return {
+        "pair": (first_fold, second_fold),
+        "description": job["description"],
+        "scores": pd.concat(
+            [held_out_rows.reset_index(drop=True), scores.reset_index(drop=True)],
+            axis=1,
+        ),
     }
-    validation_rows = pd.concat(inner_validation_rows, ignore_index=True)
-    metadata = {
-        "n_splits": inner_splits,
-        "n_samples": int(len(validation_rows)),
-        "n_chatter": int((validation_rows["target"] == 1).sum()),
-        "n_no_chatter": int((validation_rows["target"] == 0).sum()),
-        "n_runs": int(validation_rows["source_run"].nunique()),
+
+
+def _build_pairwise_ae_scores_parallel(
+    assignments: pd.DataFrame,
+    repo_root: Path,
+    *,
+    cv_seed: int,
+    n_splits: int,
+    bottleneck_dim: int,
+    epochs: int,
+    patience: int,
+    batch_size: int,
+    learning_rate: float,
+    image_size: tuple[int, int],
+    n_ver_segments: int,
+    ver_top_k: int,
+    gpu_count: int,
+    progress: bool,
+) -> dict[tuple[int, int], pd.DataFrame]:
+    """Run reusable pairwise inner AE fits concurrently across GPUs."""
+
+    pairs = _fold_pairs(n_splits)
+    jobs = [
+        {
+            "assignments": assignments,
+            "repo_root": repo_root,
+            "first_fold": first_fold,
+            "second_fold": second_fold,
+            "bottleneck_dim": bottleneck_dim,
+            "epochs": epochs,
+            "patience": patience,
+            "batch_size": batch_size,
+            "learning_rate": learning_rate,
+            "image_size": image_size,
+            "n_ver_segments": n_ver_segments,
+            "ver_top_k": ver_top_k,
+            "seed": cv_seed + first_fold * n_splits + second_fold,
+            "description": (
+                f"bn{bottleneck_dim} inner seed{cv_seed} "
+                f"folds{first_fold}+{second_fold}"
+            ),
+        }
+        for first_fold, second_fold in pairs
+    ]
+    results = _run_parallel_jobs(
+        _pairwise_ae_worker,
+        jobs,
+        gpu_count=gpu_count,
+        progress=progress,
+        description=f"bn{bottleneck_dim} pairwise inner models",
+    )
+    return {result["pair"]: result["scores"] for result in results}
+
+
+def _outer_ae_worker(job: dict[str, object]) -> dict[str, object]:
+    """Train and score one final outer-fold AE in a GPU-isolated worker."""
+
+    import tensorflow as tf
+
+    _configure_worker_gpu(tf, job["gpu_index"])
+    assignments = job["assignments"]
+    cv_fold = job["cv_fold"]
+    train_nominal = assignments[
+        (assignments["cv_fold"] != cv_fold) & (assignments["target"] == 0)
+    ].reset_index(drop=True)
+    evaluation = assignments[assignments["cv_fold"] == cv_fold].reset_index(drop=True)
+    model, train_rows, history = _fit_turning_ae_model(
+        train_nominal,
+        job["repo_root"],
+        bottleneck_dim=job["bottleneck_dim"],
+        epochs=job["epochs"],
+        patience=job["patience"],
+        batch_size=job["batch_size"],
+        learning_rate=job["learning_rate"],
+        image_size=job["image_size"],
+        seed=job["seed"],
+        description=job["description"],
+        progress=False,
+        tf=tf,
+    )
+    eval_images, eval_rows = load_rgb_images(
+        evaluation, job["repo_root"], image_size=job["image_size"]
+    )
+    eval_scores = pd.concat(
+        [
+            eval_rows.reset_index(drop=True),
+            score_reconstructions(
+                model,
+                eval_images,
+                n_ver_segments=job["n_ver_segments"],
+                ver_top_k=job["ver_top_k"],
+                batch_size=job["batch_size"],
+            ),
+        ],
+        axis=1,
+    )
+    model_path = job.get("model_path")
+    if model_path is not None:
+        model.save(model_path)
+    return {
+        "cv_seed": job["cv_seed"],
+        "cv_fold": cv_fold,
+        "description": job["description"],
+        "train_rows": train_rows,
+        "eval_rows": eval_rows,
+        "eval_scores": eval_scores,
+        "history": history.history,
     }
-    return thresholds, metadata
+
+
+def _run_outer_ae_jobs_parallel(
+    assignments_by_seed: dict[int, pd.DataFrame],
+    repo_root: Path,
+    *,
+    seed_list: list[int],
+    n_splits: int,
+    bottleneck_dim: int,
+    epochs: int,
+    patience: int,
+    batch_size: int,
+    learning_rate: float,
+    image_size: tuple[int, int],
+    n_ver_segments: int,
+    ver_top_k: int,
+    model_dir: Path | None,
+    gpu_count: int,
+    progress: bool,
+) -> list[dict[str, object]]:
+    """Run final outer-fold AE fits concurrently across GPUs."""
+
+    jobs = []
+    for cv_seed in seed_list:
+        for cv_fold in range(n_splits):
+            jobs.append(
+                {
+                    "assignments": assignments_by_seed[cv_seed],
+                    "repo_root": repo_root,
+                    "cv_seed": cv_seed,
+                    "cv_fold": cv_fold,
+                    "bottleneck_dim": bottleneck_dim,
+                    "epochs": epochs,
+                    "patience": patience,
+                    "batch_size": batch_size,
+                    "learning_rate": learning_rate,
+                    "image_size": image_size,
+                    "n_ver_segments": n_ver_segments,
+                    "ver_top_k": ver_top_k,
+                    "seed": cv_seed + cv_fold,
+                    "description": f"bn{bottleneck_dim} outer seed{cv_seed} fold{cv_fold}",
+                    "model_path": (
+                        model_dir / f"ae_bn{bottleneck_dim}_turning_cv_seed{cv_seed}_fold{cv_fold}.keras"
+                        if model_dir is not None
+                        else None
+                    ),
+                }
+            )
+    return _run_parallel_jobs(
+        _outer_ae_worker,
+        jobs,
+        gpu_count=gpu_count,
+        progress=progress,
+        description=f"bn{bottleneck_dim} outer models",
+    )
 
 
 def run_turning_ae_grouped_cv(
@@ -893,20 +1242,18 @@ def run_turning_ae_grouped_cv(
     model_dir: Path | None = None,
     progress: bool = False,
     inner_splits: int | None = None,
+    parallel_gpus: bool | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, object]]:
-    """Train and evaluate the CNN autoencoder with nested grouped CV."""
+    """Train and evaluate the CNN autoencoder with reusable nested grouped CV."""
 
     import tensorflow as tf
 
-    if inner_splits is None:
-        inner_splits = n_splits
-    if inner_splits < 2:
-        raise ValueError("inner_splits must be at least 2.")
+    inner_splits = _resolve_reusable_inner_splits(n_splits, inner_splits)
 
     metric_rows: list[dict[str, object]] = []
     score_frames: list[pd.DataFrame] = []
     threshold_payload: dict[str, object] = {
-        "threshold_protocol": "nested_grouped_inner_best_f1",
+        "threshold_protocol": NESTED_THRESHOLD_PROTOCOL,
         "inner_cv_folds": inner_splits,
         "folds": [],
     }
@@ -915,6 +1262,89 @@ def run_turning_ae_grouped_cv(
         model_dir.mkdir(parents=True, exist_ok=True)
 
     seed_list = list(seeds)
+    assignments_by_seed = {
+        cv_seed: make_grouped_cv_assignments(manifest, n_splits=n_splits, seed=cv_seed)
+        for cv_seed in seed_list
+    }
+    gpu_count = len(tf.config.list_physical_devices("GPU"))
+    use_parallel_gpus = (
+        gpu_count > 1 if parallel_gpus is None else parallel_gpus and gpu_count > 1
+    )
+    if use_parallel_gpus and not _spawn_workers_available():
+        use_parallel_gpus = False
+        if progress:
+            print(
+                "Parallel GPU training is unavailable from this interactive entry "
+                "point; using sequential training.",
+                flush=True,
+            )
+    if parallel_gpus and gpu_count < 2 and progress:
+        print(
+            "Parallel GPU training requested, but fewer than two GPUs are visible; "
+            "using sequential training.",
+            flush=True,
+        )
+    pairwise_scores_by_seed = {}
+    for cv_seed in seed_list:
+        if use_parallel_gpus:
+            pairwise_scores_by_seed[cv_seed] = _build_pairwise_ae_scores_parallel(
+                assignments_by_seed[cv_seed],
+                repo_root,
+                cv_seed=cv_seed,
+                n_splits=n_splits,
+                bottleneck_dim=bottleneck_dim,
+                epochs=epochs,
+                patience=patience,
+                batch_size=batch_size,
+                learning_rate=learning_rate,
+                image_size=image_size,
+                n_ver_segments=n_ver_segments,
+                ver_top_k=ver_top_k,
+                gpu_count=gpu_count,
+                progress=progress,
+            )
+        else:
+            pairwise_scores_by_seed[cv_seed] = _build_pairwise_ae_scores(
+                assignments_by_seed[cv_seed],
+                repo_root,
+                cv_seed=cv_seed,
+                n_splits=n_splits,
+                bottleneck_dim=bottleneck_dim,
+                epochs=epochs,
+                patience=patience,
+                batch_size=batch_size,
+                learning_rate=learning_rate,
+                image_size=image_size,
+                n_ver_segments=n_ver_segments,
+                ver_top_k=ver_top_k,
+                tf=tf,
+                progress=progress,
+            )
+
+    outer_results_by_fold: dict[tuple[int, int], dict[str, object]] = {}
+    if use_parallel_gpus:
+        outer_results = _run_outer_ae_jobs_parallel(
+            assignments_by_seed,
+            repo_root,
+            seed_list=seed_list,
+            n_splits=n_splits,
+            bottleneck_dim=bottleneck_dim,
+            epochs=epochs,
+            patience=patience,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+            image_size=image_size,
+            n_ver_segments=n_ver_segments,
+            ver_top_k=ver_top_k,
+            model_dir=model_dir,
+            gpu_count=gpu_count,
+            progress=progress,
+        )
+        outer_results_by_fold = {
+            (result["cv_seed"], result["cv_fold"]): result
+            for result in outer_results
+        }
+
     fold_jobs = [
         (cv_seed, cv_fold)
         for cv_seed in seed_list
@@ -933,11 +1363,6 @@ def run_turning_ae_grouped_cv(
     else:
         fold_jobs_iter = fold_jobs
 
-    assignments_by_seed = {
-        cv_seed: make_grouped_cv_assignments(manifest, n_splits=n_splits, seed=cv_seed)
-        for cv_seed in seed_list
-    }
-
     for cv_seed, cv_fold in fold_jobs_iter:
         assignments = assignments_by_seed[cv_seed]
         if progress:
@@ -946,59 +1371,54 @@ def run_turning_ae_grouped_cv(
         train_nominal = assignments[
             (assignments["cv_fold"] != cv_fold) & (assignments["target"] == 0)
         ].reset_index(drop=True)
-        outer_training = assignments[assignments["cv_fold"] != cv_fold].reset_index(drop=True)
         evaluation = assignments[assignments["cv_fold"] == cv_fold].reset_index(drop=True)
 
-        nested_thresholds, inner_metadata = _select_nested_ae_thresholds(
-            outer_training,
-            repo_root,
-            outer_seed=cv_seed,
+        nested_thresholds, inner_metadata = _select_thresholds_from_pairwise_scores(
+            pairwise_scores_by_seed[cv_seed],
             outer_fold=cv_fold,
-            inner_splits=inner_splits,
-            bottleneck_dim=bottleneck_dim,
-            epochs=epochs,
-            patience=patience,
-            batch_size=batch_size,
-            learning_rate=learning_rate,
-            image_size=image_size,
-            n_ver_segments=n_ver_segments,
-            ver_top_k=ver_top_k,
-            tf=tf,
+            score_columns=AE_SCORE_COLUMNS,
         )
-        model, train_rows, history = _fit_turning_ae_model(
-            train_nominal,
-            repo_root,
-            bottleneck_dim=bottleneck_dim,
-            epochs=epochs,
-            patience=patience,
-            batch_size=batch_size,
-            learning_rate=learning_rate,
-            image_size=image_size,
-            seed=cv_seed + cv_fold,
-            description=f"bn{bottleneck_dim} seed{cv_seed} fold{cv_fold}",
-            progress=progress,
-            tf=tf,
-        )
+        if use_parallel_gpus:
+            outer_result = outer_results_by_fold[(cv_seed, cv_fold)]
+            train_rows = outer_result["train_rows"]
+            eval_rows = outer_result["eval_rows"]
+            eval_scores = outer_result["eval_scores"]
+            history_values = outer_result["history"]
+        else:
+            model, train_rows, history = _fit_turning_ae_model(
+                train_nominal,
+                repo_root,
+                bottleneck_dim=bottleneck_dim,
+                epochs=epochs,
+                patience=patience,
+                batch_size=batch_size,
+                learning_rate=learning_rate,
+                image_size=image_size,
+                seed=cv_seed + cv_fold,
+                description=f"bn{bottleneck_dim} seed{cv_seed} fold{cv_fold}",
+                progress=progress,
+                tf=tf,
+            )
 
-        eval_images, eval_rows = load_rgb_images(evaluation, repo_root, image_size=image_size)
+            eval_images, eval_rows = load_rgb_images(evaluation, repo_root, image_size=image_size)
+            eval_scores = pd.concat(
+                [
+                    eval_rows.reset_index(drop=True),
+                    score_reconstructions(
+                        model,
+                        eval_images,
+                        n_ver_segments=n_ver_segments,
+                        ver_top_k=ver_top_k,
+                        batch_size=batch_size,
+                    ),
+                ],
+                axis=1,
+            )
+            if model_dir is not None:
+                model.save(model_dir / f"ae_bn{bottleneck_dim}_turning_cv_seed{cv_seed}_fold{cv_fold}.keras")
+            history_values = history.history
+
         y_eval = eval_rows["target"].to_numpy()
-
-        if model_dir is not None:
-            model.save(model_dir / f"ae_bn{bottleneck_dim}_turning_cv_seed{cv_seed}_fold{cv_fold}.keras")
-
-        eval_scores = pd.concat(
-            [
-                eval_rows.reset_index(drop=True),
-                score_reconstructions(
-                    model,
-                    eval_images,
-                    n_ver_segments=n_ver_segments,
-                    ver_top_k=ver_top_k,
-                    batch_size=batch_size,
-                ),
-            ],
-            axis=1,
-        )
 
         fold_thresholds = {}
         for score_name in AE_SCORE_COLUMNS:
@@ -1015,13 +1435,13 @@ def run_turning_ae_grouped_cv(
                 cv_fold=cv_fold,
                 train_nominal=train_rows,
                 evaluation=eval_rows,
-                threshold_protocol="nested_grouped_inner_best_f1",
+                threshold_protocol=NESTED_THRESHOLD_PROTOCOL,
             )
             row.update(
                 {
                     "bottleneck_dim": bottleneck_dim,
-                    "epochs_trained": int(len(history.history["loss"])),
-                    "best_val_loss": float(np.min(history.history["val_loss"])),
+                    "epochs_trained": int(len(history_values["loss"])),
+                    "best_val_loss": float(np.min(history_values["val_loss"])),
                 }
             )
             metric_rows.append(row)

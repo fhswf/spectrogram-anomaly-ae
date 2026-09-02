@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import random
+from math import comb
 from pathlib import Path
 
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "1")
@@ -26,6 +27,7 @@ from tensorflow.keras.models import Sequential
 from tqdm.auto import tqdm
 
 from spectrogram_anomaly_ae.turning_cv import (
+    NESTED_THRESHOLD_PROTOCOL,
     fold_balance,
     make_grouped_cv_assignments,
     run_turning_ae_grouped_cv,
@@ -58,6 +60,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-dir", type=Path, default=Path("models/bottleneck_sweep"))
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--progress", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--parallel-gpus",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Run independent grouped-CV trainings concurrently, one process per GPU; auto-detect by default.",
+    )
     parser.add_argument("--reference-dim", type=int, default=16)
     parser.add_argument(
         "--grouped-cv",
@@ -69,12 +77,15 @@ def parse_args() -> argparse.Namespace:
         "--inner-cv-folds",
         type=int,
         default=None,
-        help="Grouped folds used for inner threshold selection. Defaults to --cv-folds.",
+        help=(
+            "Inner grouped folds used for threshold selection. Must equal "
+            "--cv-folds - 1 so pairwise inner models can be reused."
+        ),
     )
     parser.add_argument(
         "--save-cv-models",
         action="store_true",
-        help="Persist every grouped-CV fold model. Disabled by default to avoid large sweep output.",
+        help="Persist each final outer-fold model. Disabled by default to avoid large sweep output.",
     )
     return parser.parse_args()
 
@@ -351,12 +362,12 @@ def run_grouped_cv_sweep(
     all_summary_frames: list[pd.DataFrame] = []
     all_balance_frames: list[pd.DataFrame] = []
     threshold_payload: dict[str, object] = {
-        "threshold_protocol": "nested_grouped_inner_best_f1",
+        "threshold_protocol": NESTED_THRESHOLD_PROTOCOL,
         "cv_folds": args.cv_folds,
         "inner_cv_folds": (
             args.inner_cv_folds
             if args.inner_cv_folds is not None
-            else args.cv_folds
+            else args.cv_folds - 1
         ),
         "seeds": seeds,
         "bottleneck_dims": args.dims,
@@ -369,11 +380,14 @@ def run_grouped_cv_sweep(
         balance.insert(0, "cv_seed", seed)
         all_balance_frames.append(balance)
 
-    for bottleneck_dim in tqdm(
-        args.dims,
-        desc="Grouped-CV bottleneck sweep",
-        unit="dim",
-        disable=not args.progress,
+    for dim_index, bottleneck_dim in enumerate(
+        tqdm(
+            args.dims,
+            desc="Grouped-CV bottleneck sweep",
+            unit="dim",
+            disable=not args.progress,
+        ),
+        start=1,
     ):
         run_name = f"bn{bottleneck_dim}_grouped_cv"
         metrics_path = args.output_dir / f"metrics_{run_name}.csv"
@@ -389,7 +403,7 @@ def run_grouped_cv_sweep(
         has_current_threshold_protocol = (
             existing_thresholds is not None
             and existing_thresholds.get("threshold_protocol")
-            == "nested_grouped_inner_best_f1"
+            == NESTED_THRESHOLD_PROTOCOL
         )
         if (
             metrics_path.exists()
@@ -405,7 +419,13 @@ def run_grouped_cv_sweep(
             summary_df = pd.read_csv(summary_path)
             thresholds = existing_thresholds
         else:
-            print(f"Training grouped CV {run_name}...", flush=True)
+            n_inner_models = len(seeds) * comb(args.cv_folds, 2)
+            n_outer_models = len(seeds) * args.cv_folds
+            print(
+                f"Training grouped CV {run_name} ({dim_index}/{len(args.dims)}): "
+                f"{n_inner_models} reusable inner models + {n_outer_models} outer models",
+                flush=True,
+            )
             metrics_df, scores_df, summary_df, thresholds = run_turning_ae_grouped_cv(
                 manifest,
                 repo_root,
@@ -422,6 +442,7 @@ def run_grouped_cv_sweep(
                 ver_top_k=args.ver_top_k,
                 model_dir=cv_model_dir,
                 progress=args.progress,
+                parallel_gpus=args.parallel_gpus,
             )
             metrics_df.to_csv(metrics_path, index=False)
             scores_df.to_csv(scores_path, index=False)
@@ -528,8 +549,14 @@ def main() -> None:
     all_score_stat_rows: list[pd.DataFrame] = []
     run_grid = [(bottleneck_dim, seed) for bottleneck_dim in args.dims for seed in seeds]
 
-    for bottleneck_dim, seed in tqdm(
-        run_grid, desc="Bottleneck/seed sweep", unit="run", disable=not args.progress
+    for run_index, (bottleneck_dim, seed) in enumerate(
+        tqdm(
+            run_grid,
+            desc="Bottleneck/seed sweep",
+            unit="run",
+            disable=not args.progress,
+        ),
+        start=1,
     ):
         run_name = f"bn{bottleneck_dim}_seed{seed}"
         metrics_path = args.output_dir / f"metrics_{run_name}.csv"
@@ -540,7 +567,10 @@ def main() -> None:
         model_path = args.model_dir / f"ae_bn{bottleneck_dim}_turning_seed{seed}.keras"
 
         if metrics_path.exists() and history_path.exists() and scores_path.exists() and not args.overwrite:
-            print(f"Skipping {run_name}: existing outputs found.", flush=True)
+            print(
+                f"Skipping {run_name} ({run_index}/{len(run_grid)}): existing outputs found.",
+                flush=True,
+            )
             existing_metrics = pd.read_csv(metrics_path)
             existing_history = pd.read_csv(history_path)
             existing_stats = pd.read_csv(stats_path)
@@ -564,7 +594,11 @@ def main() -> None:
             all_score_stat_rows.append(existing_stats)
             continue
 
-        print(f"Training {run_name}...", flush=True)
+        print(
+            f"Training {run_name} ({run_index}/{len(run_grid)}): "
+            f"{len(training_images)} nominal images, up to {args.epochs} epochs",
+            flush=True,
+        )
         tf.keras.backend.clear_session()
         set_seed(seed)
         x_train, x_val = train_test_split(

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import pandas as pd
 
 from spectrogram_anomaly_ae.turning_cv import (
+    NESTED_THRESHOLD_PROTOCOL,
     fold_balance,
     make_grouped_cv_assignments,
     run_turning_baseline_grouped_cv,
@@ -28,7 +30,10 @@ def parse_args() -> argparse.Namespace:
         "--inner-cv-folds",
         type=int,
         default=None,
-        help="Grouped folds used for inner threshold selection. Defaults to --cv-folds.",
+        help=(
+            "Inner grouped folds used for threshold selection. Must equal "
+            "--cv-folds - 1 so pairwise inner models can be reused."
+        ),
     )
     parser.add_argument("--seed", type=int, default=42, help="Legacy single-seed option.")
     parser.add_argument(
@@ -62,7 +67,16 @@ def main() -> None:
     balance_path = args.cv_dir / "turning_baseline_grouped_cv_fold_balance.csv"
 
     output_paths = [metrics_path, summary_path, scores_path, threshold_path, balance_path]
-    if all(path.exists() for path in output_paths) and not args.overwrite:
+    existing_thresholds = None
+    if threshold_path.exists():
+        with threshold_path.open("r", encoding="utf-8") as file:
+            existing_thresholds = json.load(file)
+    if (
+        all(path.exists() for path in output_paths)
+        and existing_thresholds is not None
+        and existing_thresholds.get("threshold_protocol") == NESTED_THRESHOLD_PROTOCOL
+        and not args.overwrite
+    ):
         print("Skipping turning baseline grouped CV: existing outputs found.", flush=True)
         for path in output_paths:
             print(f"  {path}", flush=True)
@@ -98,7 +112,7 @@ def main() -> None:
             "inner_cv_folds": (
                 args.inner_cv_folds
                 if args.inner_cv_folds is not None
-                else args.cv_folds
+                else args.cv_folds - 1
             ),
             "seeds": seeds,
             "pca_components": args.pca_components,
