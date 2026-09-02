@@ -485,6 +485,7 @@ def _metric_row(
     cv_fold: int,
     train_nominal: pd.DataFrame,
     evaluation: pd.DataFrame,
+    threshold_protocol: str = "fold_internal_best_f1",
 ) -> dict[str, object]:
     return {
         "dataset": dataset_name,
@@ -492,7 +493,7 @@ def _metric_row(
         "score": score_name,
         "cv_seed": cv_seed,
         "cv_fold": cv_fold,
-        "threshold_protocol": "fold_internal_best_f1",
+        "threshold_protocol": threshold_protocol,
         "threshold": selected["threshold"],
         "validation_f1": selected["validation_f1"],
         "validation_precision": selected["validation_precision"],
@@ -506,21 +507,123 @@ def _metric_row(
     }
 
 
+def _score_turning_baselines(
+    train_nominal: pd.DataFrame,
+    evaluation: pd.DataFrame,
+    repo_root: Path,
+    *,
+    image_size: tuple[int, int],
+    pca_components: int,
+    random_state: int,
+) -> dict[str, np.ndarray]:
+    """Fit turning baselines on nominal rows and score an evaluation partition."""
+
+    X_train_desc = load_matrix(
+        train_nominal, repo_root, image_descriptor, image_size=image_size
+    )
+    X_eval_desc = load_matrix(evaluation, repo_root, image_descriptor, image_size=image_size)
+    scaler = StandardScaler().fit(X_train_desc)
+    X_train_desc = scaler.transform(X_train_desc)
+    X_eval_desc = scaler.transform(X_eval_desc)
+
+    ocsvm = OneClassSVM(kernel="rbf", gamma="scale", nu=0.05).fit(X_train_desc)
+    iforest = IsolationForest(random_state=random_state, contamination="auto").fit(X_train_desc)
+    scores = {
+        "one_class_svm_image_features": -ocsvm.decision_function(X_eval_desc),
+        "isolation_forest_image_features": -iforest.decision_function(X_eval_desc),
+    }
+
+    X_train_vec = load_matrix(train_nominal, repo_root, image_vector, image_size=image_size)
+    X_eval_vec = load_matrix(evaluation, repo_root, image_vector, image_size=image_size)
+    n_components = min(pca_components, X_train_vec.shape[0], X_train_vec.shape[1])
+    pca = PCA(n_components=n_components, random_state=random_state, svd_solver="randomized").fit(
+        X_train_vec
+    )
+    eval_recon = pca.inverse_transform(pca.transform(X_eval_vec))
+    scores["pca_image_reconstruction"] = np.mean((X_eval_vec - eval_recon) ** 2, axis=1)
+    return scores
+
+
+def _select_nested_thresholds(
+    outer_training: pd.DataFrame,
+    repo_root: Path,
+    *,
+    outer_seed: int,
+    outer_fold: int,
+    inner_splits: int,
+    image_size: tuple[int, int],
+    pca_components: int,
+) -> tuple[dict[str, dict[str, float]], dict[str, int]]:
+    """Select thresholds from grouped inner out-of-fold scores only."""
+
+    inner_assignments = make_grouped_cv_assignments(
+        outer_training,
+        n_splits=inner_splits,
+        seed=outer_seed + outer_fold,
+    )
+    inner_scores: dict[str, list[np.ndarray]] = {}
+    inner_targets: list[np.ndarray] = []
+    inner_validation = []
+
+    for inner_fold in range(inner_splits):
+        inner_train_nominal = inner_assignments[
+            (inner_assignments["cv_fold"] != inner_fold)
+            & (inner_assignments["target"] == 0)
+        ].reset_index(drop=True)
+        validation = inner_assignments[
+            inner_assignments["cv_fold"] == inner_fold
+        ].reset_index(drop=True)
+        scores = _score_turning_baselines(
+            inner_train_nominal,
+            validation,
+            repo_root,
+            image_size=image_size,
+            pca_components=pca_components,
+            random_state=outer_seed + outer_fold * inner_splits + inner_fold,
+        )
+        for method, values in scores.items():
+            inner_scores.setdefault(method, []).append(values)
+        inner_targets.append(validation["target"].to_numpy())
+        inner_validation.append(validation)
+
+    y_inner = np.concatenate(inner_targets)
+    thresholds = {
+        method: select_best_f1_threshold(y_inner, np.concatenate(values))
+        for method, values in inner_scores.items()
+    }
+    validation_rows = pd.concat(inner_validation, ignore_index=True)
+    metadata = {
+        "n_splits": inner_splits,
+        "n_samples": int(len(validation_rows)),
+        "n_chatter": int((validation_rows["target"] == 1).sum()),
+        "n_no_chatter": int((validation_rows["target"] == 0).sum()),
+        "n_runs": int(validation_rows["source_run"].nunique()),
+    }
+    return thresholds, metadata
+
+
 def run_turning_baseline_grouped_cv(
     manifest: pd.DataFrame,
     repo_root: Path,
     *,
     n_splits: int = 5,
     seeds: Iterable[int] = (42,),
+    inner_splits: int | None = None,
     image_size: tuple[int, int] = (150, 100),
     pca_components: int = 32,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, object]]:
-    """Run grouped CV for turning descriptor/PCA baselines."""
+    """Run nested grouped CV for turning descriptor/PCA baselines."""
+
+    if inner_splits is None:
+        inner_splits = n_splits
+    if inner_splits < 2:
+        raise ValueError("inner_splits must be at least 2.")
 
     metric_rows: list[dict[str, object]] = []
     score_frames: list[pd.DataFrame] = []
     threshold_payload: dict[str, object] = {
-        "threshold_protocol": "fold_internal_best_f1",
+        "threshold_protocol": "nested_grouped_inner_best_f1",
+        "inner_cv_folds": inner_splits,
         "folds": [],
     }
 
@@ -530,27 +633,35 @@ def run_turning_baseline_grouped_cv(
             train_nominal = assignments[
                 (assignments["cv_fold"] != cv_fold) & (assignments["target"] == 0)
             ].reset_index(drop=True)
+            outer_training = assignments[assignments["cv_fold"] != cv_fold].reset_index(drop=True)
             evaluation = assignments[assignments["cv_fold"] == cv_fold].reset_index(drop=True)
             y_eval = evaluation["target"].to_numpy()
 
-            X_train_desc = load_matrix(
-                train_nominal, repo_root, image_descriptor, image_size=image_size
+            nested_thresholds, inner_metadata = _select_nested_thresholds(
+                outer_training,
+                repo_root,
+                outer_seed=cv_seed,
+                outer_fold=cv_fold,
+                inner_splits=inner_splits,
+                image_size=image_size,
+                pca_components=pca_components,
             )
-            X_eval_desc = load_matrix(evaluation, repo_root, image_descriptor, image_size=image_size)
-            scaler = StandardScaler().fit(X_train_desc)
-            X_train_desc = scaler.transform(X_train_desc)
-            X_eval_desc = scaler.transform(X_eval_desc)
-
-            ocsvm = OneClassSVM(kernel="rbf", gamma="scale", nu=0.05).fit(X_train_desc)
-            iforest = IsolationForest(random_state=cv_seed, contamination="auto").fit(X_train_desc)
-            descriptor_models = {
-                "one_class_svm_image_features": -ocsvm.decision_function(X_eval_desc),
-                "isolation_forest_image_features": -iforest.decision_function(X_eval_desc),
-            }
+            outer_scores = _score_turning_baselines(
+                train_nominal,
+                evaluation,
+                repo_root,
+                image_size=image_size,
+                pca_components=pca_components,
+                random_state=cv_seed + cv_fold,
+            )
 
             fold_thresholds = {}
-            for method, eval_scores in descriptor_models.items():
-                selected = select_best_f1_threshold(y_eval, eval_scores)
+            for method in (
+                "one_class_svm_image_features",
+                "isolation_forest_image_features",
+            ):
+                eval_scores = outer_scores[method]
+                selected = nested_thresholds[method]
                 metrics = evaluate_at_threshold(y_eval, eval_scores, selected["threshold"])
                 metric_rows.append(
                     _metric_row(
@@ -563,6 +674,7 @@ def run_turning_baseline_grouped_cv(
                         cv_fold=cv_fold,
                         train_nominal=train_nominal,
                         evaluation=evaluation,
+                        threshold_protocol="nested_grouped_inner_best_f1",
                     )
                 )
                 score_frames.append(
@@ -577,16 +689,9 @@ def run_turning_baseline_grouped_cv(
                 )
                 fold_thresholds[method] = selected
 
-            X_train_vec = load_matrix(train_nominal, repo_root, image_vector, image_size=image_size)
-            X_eval_vec = load_matrix(evaluation, repo_root, image_vector, image_size=image_size)
-            n_components = min(pca_components, X_train_vec.shape[0], X_train_vec.shape[1])
-            pca = PCA(n_components=n_components, random_state=cv_seed, svd_solver="randomized").fit(
-                X_train_vec
-            )
-            eval_recon = pca.inverse_transform(pca.transform(X_eval_vec))
-            eval_scores = np.mean((X_eval_vec - eval_recon) ** 2, axis=1)
             method = "pca_image_reconstruction"
-            selected = select_best_f1_threshold(y_eval, eval_scores)
+            eval_scores = outer_scores[method]
+            selected = nested_thresholds[method]
             metrics = evaluate_at_threshold(y_eval, eval_scores, selected["threshold"])
             metric_rows.append(
                 _metric_row(
@@ -599,6 +704,7 @@ def run_turning_baseline_grouped_cv(
                     cv_fold=cv_fold,
                     train_nominal=train_nominal,
                     evaluation=evaluation,
+                    threshold_protocol="nested_grouped_inner_best_f1",
                 )
             )
             score_frames.append(
@@ -616,6 +722,7 @@ def run_turning_baseline_grouped_cv(
                 {
                     "cv_seed": cv_seed,
                     "cv_fold": cv_fold,
+                    "inner_cv": inner_metadata,
                     "thresholds": fold_thresholds,
                 }
             )
@@ -626,6 +733,147 @@ def run_turning_baseline_grouped_cv(
         metrics_df, group_columns=["dataset", "method", "score"]
     )
     return metrics_df, scores_df, summary_df, threshold_payload
+
+
+def _fit_turning_ae_model(
+    train_nominal: pd.DataFrame,
+    repo_root: Path,
+    *,
+    bottleneck_dim: int,
+    epochs: int,
+    patience: int,
+    batch_size: int,
+    learning_rate: float,
+    image_size: tuple[int, int],
+    seed: int,
+    description: str,
+    progress: bool,
+    tf: object,
+) -> tuple[object, pd.DataFrame, object]:
+    """Fit one autoencoder using only nominal rows from the supplied partition."""
+
+    tf.keras.backend.clear_session()
+    set_seed(seed)
+    train_images, train_rows = load_rgb_images(
+        train_nominal, repo_root, image_size=image_size
+    )
+    x_train, x_stop = train_test_split(
+        train_images,
+        test_size=0.2,
+        random_state=seed,
+        shuffle=True,
+    )
+    model = build_cnn_autoencoder(
+        bottleneck_dim=bottleneck_dim,
+        learning_rate=learning_rate,
+    )
+    callbacks = [
+        TqdmEpochCallback(
+            total_epochs=epochs,
+            desc=description,
+            disable=not progress,
+        ),
+        tf.keras.callbacks.EarlyStopping(
+            monitor="val_loss",
+            patience=patience,
+            min_delta=1e-6,
+            restore_best_weights=True,
+            verbose=0,
+        ),
+    ]
+    history = model.fit(
+        x_train,
+        x_train,
+        epochs=epochs,
+        batch_size=batch_size,
+        validation_data=(x_stop, x_stop),
+        shuffle=True,
+        verbose=0,
+        callbacks=callbacks,
+    )
+    return model, train_rows, history
+
+
+def _select_nested_ae_thresholds(
+    outer_training: pd.DataFrame,
+    repo_root: Path,
+    *,
+    outer_seed: int,
+    outer_fold: int,
+    inner_splits: int,
+    bottleneck_dim: int,
+    epochs: int,
+    patience: int,
+    batch_size: int,
+    learning_rate: float,
+    image_size: tuple[int, int],
+    n_ver_segments: int,
+    ver_top_k: int,
+    tf: object,
+) -> tuple[dict[str, dict[str, float]], dict[str, int]]:
+    """Select AE thresholds from grouped inner out-of-fold scores only."""
+
+    inner_assignments = make_grouped_cv_assignments(
+        outer_training,
+        n_splits=inner_splits,
+        seed=outer_seed + outer_fold,
+    )
+    inner_scores: dict[str, list[np.ndarray]] = {}
+    inner_targets: list[np.ndarray] = []
+    inner_validation_rows = []
+
+    for inner_fold in range(inner_splits):
+        inner_train_nominal = inner_assignments[
+            (inner_assignments["cv_fold"] != inner_fold)
+            & (inner_assignments["target"] == 0)
+        ].reset_index(drop=True)
+        validation = inner_assignments[
+            inner_assignments["cv_fold"] == inner_fold
+        ].reset_index(drop=True)
+        model, _, _ = _fit_turning_ae_model(
+            inner_train_nominal,
+            repo_root,
+            bottleneck_dim=bottleneck_dim,
+            epochs=epochs,
+            patience=patience,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+            image_size=image_size,
+            seed=outer_seed + outer_fold * inner_splits + inner_fold,
+            description=f"bn{bottleneck_dim} inner seed{outer_seed} fold{outer_fold}/{inner_fold}",
+            progress=False,
+            tf=tf,
+        )
+        validation_images, validation_rows = load_rgb_images(
+            validation, repo_root, image_size=image_size
+        )
+        scores = score_reconstructions(
+            model,
+            validation_images,
+            n_ver_segments=n_ver_segments,
+            ver_top_k=ver_top_k,
+            batch_size=batch_size,
+        )
+        for score_name in AE_SCORE_COLUMNS:
+            inner_scores.setdefault(score_name, []).append(scores[score_name].to_numpy())
+        inner_targets.append(validation_rows["target"].to_numpy())
+        inner_validation_rows.append(validation_rows)
+        del model
+
+    y_inner = np.concatenate(inner_targets)
+    thresholds = {
+        score_name: select_best_f1_threshold(y_inner, np.concatenate(values))
+        for score_name, values in inner_scores.items()
+    }
+    validation_rows = pd.concat(inner_validation_rows, ignore_index=True)
+    metadata = {
+        "n_splits": inner_splits,
+        "n_samples": int(len(validation_rows)),
+        "n_chatter": int((validation_rows["target"] == 1).sum()),
+        "n_no_chatter": int((validation_rows["target"] == 0).sum()),
+        "n_runs": int(validation_rows["source_run"].nunique()),
+    }
+    return thresholds, metadata
 
 
 def run_turning_ae_grouped_cv(
@@ -644,15 +892,22 @@ def run_turning_ae_grouped_cv(
     ver_top_k: int = 3,
     model_dir: Path | None = None,
     progress: bool = False,
+    inner_splits: int | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, object]]:
-    """Train and evaluate the CNN autoencoder with repeated grouped CV."""
+    """Train and evaluate the CNN autoencoder with nested grouped CV."""
 
     import tensorflow as tf
+
+    if inner_splits is None:
+        inner_splits = n_splits
+    if inner_splits < 2:
+        raise ValueError("inner_splits must be at least 2.")
 
     metric_rows: list[dict[str, object]] = []
     score_frames: list[pd.DataFrame] = []
     threshold_payload: dict[str, object] = {
-        "threshold_protocol": "fold_internal_best_f1",
+        "threshold_protocol": "nested_grouped_inner_best_f1",
+        "inner_cv_folds": inner_splits,
         "folds": [],
     }
 
@@ -687,54 +942,46 @@ def run_turning_ae_grouped_cv(
         assignments = assignments_by_seed[cv_seed]
         if progress:
             fold_jobs_iter.set_postfix({"seed": cv_seed, "fold": cv_fold})
-        tf.keras.backend.clear_session()
-        set_seed(cv_seed + cv_fold)
 
         train_nominal = assignments[
             (assignments["cv_fold"] != cv_fold) & (assignments["target"] == 0)
         ].reset_index(drop=True)
+        outer_training = assignments[assignments["cv_fold"] != cv_fold].reset_index(drop=True)
         evaluation = assignments[assignments["cv_fold"] == cv_fold].reset_index(drop=True)
 
-        train_images, train_rows = load_rgb_images(
-            train_nominal, repo_root, image_size=image_size
+        nested_thresholds, inner_metadata = _select_nested_ae_thresholds(
+            outer_training,
+            repo_root,
+            outer_seed=cv_seed,
+            outer_fold=cv_fold,
+            inner_splits=inner_splits,
+            bottleneck_dim=bottleneck_dim,
+            epochs=epochs,
+            patience=patience,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+            image_size=image_size,
+            n_ver_segments=n_ver_segments,
+            ver_top_k=ver_top_k,
+            tf=tf,
         )
+        model, train_rows, history = _fit_turning_ae_model(
+            train_nominal,
+            repo_root,
+            bottleneck_dim=bottleneck_dim,
+            epochs=epochs,
+            patience=patience,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+            image_size=image_size,
+            seed=cv_seed + cv_fold,
+            description=f"bn{bottleneck_dim} seed{cv_seed} fold{cv_fold}",
+            progress=progress,
+            tf=tf,
+        )
+
         eval_images, eval_rows = load_rgb_images(evaluation, repo_root, image_size=image_size)
         y_eval = eval_rows["target"].to_numpy()
-
-        x_train, x_stop = train_test_split(
-            train_images,
-            test_size=0.2,
-            random_state=cv_seed + cv_fold,
-            shuffle=True,
-        )
-        model = build_cnn_autoencoder(
-            bottleneck_dim=bottleneck_dim,
-            learning_rate=learning_rate,
-        )
-        callbacks = [
-            TqdmEpochCallback(
-                total_epochs=epochs,
-                desc=f"bn{bottleneck_dim} seed{cv_seed} fold{cv_fold}",
-                disable=not progress,
-            ),
-            tf.keras.callbacks.EarlyStopping(
-                monitor="val_loss",
-                patience=patience,
-                min_delta=1e-6,
-                restore_best_weights=True,
-                verbose=0,
-            ),
-        ]
-        history = model.fit(
-            x_train,
-            x_train,
-            epochs=epochs,
-            batch_size=batch_size,
-            validation_data=(x_stop, x_stop),
-            shuffle=True,
-            verbose=0,
-            callbacks=callbacks,
-        )
 
         if model_dir is not None:
             model.save(model_dir / f"ae_bn{bottleneck_dim}_turning_cv_seed{cv_seed}_fold{cv_fold}.keras")
@@ -756,7 +1003,7 @@ def run_turning_ae_grouped_cv(
         fold_thresholds = {}
         for score_name in AE_SCORE_COLUMNS:
             values = eval_scores[score_name].to_numpy()
-            selected = select_best_f1_threshold(y_eval, values)
+            selected = nested_thresholds[score_name]
             metrics = evaluate_at_threshold(y_eval, values, selected["threshold"])
             row = _metric_row(
                 dataset_name="turning",
@@ -768,6 +1015,7 @@ def run_turning_ae_grouped_cv(
                 cv_fold=cv_fold,
                 train_nominal=train_rows,
                 evaluation=eval_rows,
+                threshold_protocol="nested_grouped_inner_best_f1",
             )
             row.update(
                 {
@@ -794,6 +1042,7 @@ def run_turning_ae_grouped_cv(
             {
                 "cv_seed": cv_seed,
                 "cv_fold": cv_fold,
+                "inner_cv": inner_metadata,
                 "thresholds": fold_thresholds,
             }
         )

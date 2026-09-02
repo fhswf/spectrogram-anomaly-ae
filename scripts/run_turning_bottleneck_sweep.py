@@ -66,6 +66,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--cv-folds", type=int, default=5)
     parser.add_argument(
+        "--inner-cv-folds",
+        type=int,
+        default=None,
+        help="Grouped folds used for inner threshold selection. Defaults to --cv-folds.",
+    )
+    parser.add_argument(
         "--save-cv-models",
         action="store_true",
         help="Persist every grouped-CV fold model. Disabled by default to avoid large sweep output.",
@@ -345,8 +351,13 @@ def run_grouped_cv_sweep(
     all_summary_frames: list[pd.DataFrame] = []
     all_balance_frames: list[pd.DataFrame] = []
     threshold_payload: dict[str, object] = {
-        "threshold_protocol": "fold_internal_best_f1",
+        "threshold_protocol": "nested_grouped_inner_best_f1",
         "cv_folds": args.cv_folds,
+        "inner_cv_folds": (
+            args.inner_cv_folds
+            if args.inner_cv_folds is not None
+            else args.cv_folds
+        ),
         "seeds": seeds,
         "bottleneck_dims": args.dims,
         "bottleneck_thresholds": {},
@@ -371,19 +382,28 @@ def run_grouped_cv_sweep(
         thresholds_path = args.output_dir / f"thresholds_{run_name}.json"
         cv_model_dir = args.model_dir / run_name if args.save_cv_models else None
 
+        existing_thresholds = None
+        if thresholds_path.exists():
+            with thresholds_path.open("r", encoding="utf-8") as file:
+                existing_thresholds = json.load(file)
+        has_current_threshold_protocol = (
+            existing_thresholds is not None
+            and existing_thresholds.get("threshold_protocol")
+            == "nested_grouped_inner_best_f1"
+        )
         if (
             metrics_path.exists()
             and scores_path.exists()
             and summary_path.exists()
             and thresholds_path.exists()
+            and has_current_threshold_protocol
             and not args.overwrite
         ):
             print(f"Skipping {run_name}: existing outputs found.", flush=True)
             metrics_df = pd.read_csv(metrics_path)
             scores_df = pd.read_csv(scores_path)
             summary_df = pd.read_csv(summary_path)
-            with thresholds_path.open("r", encoding="utf-8") as file:
-                thresholds = json.load(file)
+            thresholds = existing_thresholds
         else:
             print(f"Training grouped CV {run_name}...", flush=True)
             metrics_df, scores_df, summary_df, thresholds = run_turning_ae_grouped_cv(
@@ -391,6 +411,7 @@ def run_grouped_cv_sweep(
                 repo_root,
                 n_splits=args.cv_folds,
                 seeds=seeds,
+                inner_splits=args.inner_cv_folds,
                 bottleneck_dim=bottleneck_dim,
                 epochs=args.epochs,
                 patience=args.patience,
