@@ -1,0 +1,20 @@
+{
+  "one_class_svm_image_features": {
+    "threshold": 0.2263308130978794,
+    "validation_f1": 0.9275362318840579,
+    "validation_precision": 0.9142857142857143,
+    "validation_recall": 0.9411764705882353
+  },
+  "isolation_forest_image_features": {
+    "threshold": 0.045325628913368665,
+    "validation_f1": 0.9577464788732395,
+    "validation_precision": 0.918918918918919,
+    "validation_recall": 1.0
+  },
+  "pca_image_reconstruction": {
+    "threshold": 0.001353343715891242,
+    "validation_f1": 0.9117647058823528,
+    "validation_precision": 0.9117647058823529,
+    "validation_recall": 0.9117647058823529
+  }
+}

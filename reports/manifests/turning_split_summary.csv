@@ -1,0 +1,6 @@
+source_dataset,split,label,n
+turning,test,chatter,27
+turning,test,no_chatter,48
+turning,train,no_chatter,472
+turning,validation,chatter,34
+turning,validation,no_chatter,70

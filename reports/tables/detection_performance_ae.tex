@@ -1,0 +1,15 @@
+\begin{table}[H]
+\centering
+\caption{Detection performance of different anomaly scoring methods on the test set.}
+\begin{tabular}{lcccc}
+\hline
+Method & PR-AUC & F1-score & Precision & Recall \\
+\hline
+VER (max segment) & 0.992 & 0.872 & 1.000 & 0.773 \\
+VER (top-$k$) & 0.869 & 0.811 & 1.000 & 0.682 \\
+Global MSE & 0.593 & 0.625 & 1.000 & 0.455 \\
+Global MAE & 0.324 & 0.429 & 1.000 & 0.273 \\
+\hline
+\end{tabular}
+\label{tab:detection_performance}
+\end{table}

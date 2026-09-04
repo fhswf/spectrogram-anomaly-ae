@@ -1,0 +1,6 @@
+split,label,n
+test,0,2478
+test,1,22
+train,0,5000
+validation,0,2477
+validation,1,23

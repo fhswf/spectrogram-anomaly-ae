@@ -1,0 +1,80 @@
+{
+  "global_mse": {
+    "threshold": 0.0011022323742508888,
+    "validation_f1": 0.7222222222217608,
+    "validation_precision": 1.0,
+    "validation_recall": 0.5652173913043478
+  },
+  "global_mae": {
+    "threshold": 0.013985994271934032,
+    "validation_f1": 0.5789473684205747,
+    "validation_precision": 0.7333333333333333,
+    "validation_recall": 0.4782608695652174
+  },
+  "ver_max": {
+    "threshold": 0.003398982109501958,
+    "validation_f1": 0.8444444444439446,
+    "validation_precision": 0.8636363636363636,
+    "validation_recall": 0.8260869565217391
+  },
+  "ver_topk": {
+    "threshold": 0.0020558079704642296,
+    "validation_f1": 0.8181818181813192,
+    "validation_precision": 0.8571428571428571,
+    "validation_recall": 0.782608695652174
+  },
+  "maxpool_mse_3x3": {
+    "threshold": 0.0030270623974502087,
+    "validation_f1": 0.7894736842100485,
+    "validation_precision": 1.0,
+    "validation_recall": 0.6521739130434783
+  },
+  "maxpool_mse_5x5": {
+    "threshold": 0.005116794724017382,
+    "validation_f1": 0.7999999999995111,
+    "validation_precision": 0.9411764705882353,
+    "validation_recall": 0.6956521739130435
+  },
+  "maxpool_mse_9x9": {
+    "threshold": 0.010107052512466908,
+    "validation_f1": 0.8205128205123365,
+    "validation_precision": 1.0,
+    "validation_recall": 0.6956521739130435
+  },
+  "maxpool_mse_15x15": {
+    "threshold": 0.016485905274748802,
+    "validation_f1": 0.8571428571423616,
+    "validation_precision": 0.9473684210526315,
+    "validation_recall": 0.782608695652174
+  },
+  "maxpool_mse_25x25": {
+    "threshold": 0.028524721041321754,
+    "validation_f1": 0.8780487804873124,
+    "validation_precision": 1.0,
+    "validation_recall": 0.782608695652174
+  },
+  "maxpool_mse_35x35": {
+    "threshold": 0.04073825478553772,
+    "validation_f1": 0.8780487804873124,
+    "validation_precision": 1.0,
+    "validation_recall": 0.782608695652174
+  },
+  "maxpool_mse_51x51": {
+    "threshold": 0.06033642962574959,
+    "validation_f1": 0.8780487804873124,
+    "validation_precision": 1.0,
+    "validation_recall": 0.782608695652174
+  },
+  "maxpool_mse_75x75": {
+    "threshold": 0.10425974428653717,
+    "validation_f1": 0.8205128205123365,
+    "validation_precision": 1.0,
+    "validation_recall": 0.6956521739130435
+  },
+  "maxpool_mse_101x101": {
+    "threshold": 0.12075731158256531,
+    "validation_f1": 0.8499999999995111,
+    "validation_precision": 1.0,
+    "validation_recall": 0.7391304347826086
+  }
+}

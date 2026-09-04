@@ -1,0 +1,4 @@
+dataset,method,score,threshold,pr_auc,f1,precision,recall,tn,fp,fn,tp
+broach_dataset,one_class_svm_image_features,anomaly_score,15.57981948760888,0.9176203996030551,0.7692307692307693,0.8823529411764706,0.6818181818181818,2476,2,7,15
+broach_dataset,isolation_forest_image_features,anomaly_score,0.14006711005311467,0.7590967467006884,0.6285714285714286,0.8461538461538461,0.5,2476,2,11,11
+broach_dataset,pca_image_reconstruction,reconstruction_mse,0.0005033610505051911,0.9632920110192837,0.9,1.0,0.8181818181818182,2478,0,4,18

@@ -1,0 +1,4 @@
+dataset,method,score,threshold,pr_auc,f1,precision,recall,tn,fp,fn,tp
+turning,one_class_svm_image_features,anomaly_score,0.2263308130978794,0.9973055065647658,0.9615384615384616,1.0,0.9259259259259259,48,0,2,25
+turning,isolation_forest_image_features,anomaly_score,0.045325628913368665,0.9973055065647658,0.9818181818181818,0.9642857142857143,1.0,47,1,0,27
+turning,pca_image_reconstruction,reconstruction_mse,0.001353343715891242,0.9653103033065837,0.9473684210526315,0.9,1.0,45,3,0,27

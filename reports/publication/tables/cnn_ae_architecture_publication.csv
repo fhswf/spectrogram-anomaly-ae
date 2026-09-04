@@ -1,0 +1,17 @@
+stage,layer,type,kernel,stride_pool,padding,activation,output_shape,params
+Input,Input image,Input,,,,,100 x 150 x 3,0
+Encoder,Conv2D-4,Conv2D,3 x 3,1 x 1,same,ReLU,100 x 150 x 4,112
+Encoder,MaxPool,MaxPooling2D,,2 x 2,same,,50 x 75 x 4,0
+Encoder,Conv2D-8,Conv2D,3 x 3,1 x 1,same,ReLU,50 x 75 x 8,296
+Encoder,MaxPool,MaxPooling2D,,2 x 3,same,,25 x 25 x 8,0
+Encoder,Conv2D-12,Conv2D,3 x 3,1 x 1,same,ReLU,25 x 25 x 12,876
+Bottleneck,Flatten,Flatten,,,,,7500,0
+Bottleneck,Dense-16,Dense,,,,ReLU,16,120016
+Decoder,Dense-7500,Dense,,,,ReLU,7500,127500
+Decoder,Reshape,Reshape,,,,,25 x 25 x 12,0
+Decoder,Conv2D-12,Conv2D,3 x 3,1 x 1,same,ReLU,25 x 25 x 12,1308
+Decoder,UpSampling,UpSampling2D,,2 x 3,,,50 x 75 x 12,0
+Decoder,Conv2D-8,Conv2D,3 x 3,1 x 1,same,ReLU,50 x 75 x 8,872
+Decoder,UpSampling,UpSampling2D,,2 x 2,,,100 x 150 x 8,0
+Decoder,Conv2D-4,Conv2D,3 x 3,1 x 1,same,ReLU,100 x 150 x 4,292
+Output,Conv2D-3,Conv2D,3 x 3,1 x 1,same,Sigmoid,100 x 150 x 3,111

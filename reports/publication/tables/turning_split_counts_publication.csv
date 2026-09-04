@@ -1,0 +1,4 @@
+split,Chatter,Nominal
+train,0.0,472.0
+validation,34.0,70.0
+test,27.0,48.0
