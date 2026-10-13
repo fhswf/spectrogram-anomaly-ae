@@ -1,12 +1,30 @@
 cff-version: 1.2.0
+message: "If you use this software, please cite both the software and its associated paper."
 title: "autoencoder-anomaly-detection"
 authors:
   - family-names: Zeleny
     given-names: Sebastian
+    orcid: https://orcid.org/0009-0002-5888-4892
   - family-names: Gawron
     given-names: Christian
     affiliation: "FH Südwestfalen"
     orcid: https://orcid.org/0000-0001-7139-7920
+preferred-citation:
+  type: article
+  title: "Spectrogram-Based CNN Autoencoder for One-Class Anomaly Detection in Machining Vibration Signals"
+  authors:
+    - family-names: Zeleny
+      given-names: Sebastian
+      orcid: https://orcid.org/0009-0002-5888-4892
+    - family-names: Gawron
+      given-names: Christian
+      orcid: https://orcid.org/0000-0001-7139-7920
+  journal: "Applied Sciences"
+  volume: 16
+  issue: 20
+  year: 2026
+  doi: "10.3390/app162010082"
+  url: "https://doi.org/10.3390/app162010082"
 references:
   - type: dataset
     title: "Turning Dataset for Chatter Diagnosis Using Machine Learning"
